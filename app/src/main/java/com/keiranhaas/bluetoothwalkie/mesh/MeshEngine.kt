@@ -20,7 +20,8 @@ class MeshEngine(
     private val onVoiceStart:
         (
             sessionId: Long,
-            callsign: String
+            callsign: String,
+            firstSequence: Int
         ) -> Unit,
     private val onVoiceFrame:
         (
@@ -33,6 +34,8 @@ class MeshEngine(
             sessionId: Long,
             endSequence: Int
         ) -> Unit,
+    private val onTransmitPreempted:
+        (winnerCallsign: String) -> Unit,
     onPeerCountChanged:
         (Int) -> Unit,
     onStatus:
@@ -88,6 +91,9 @@ class MeshEngine(
             String
         >()
 
+    private val arbiter =
+        TalkerArbiter()
+
     private val transport =
         BleMeshTransport(
             context =
@@ -141,6 +147,10 @@ class MeshEngine(
         Job? =
         null
 
+    private var floorJob:
+        Job? =
+        null
+
     fun updateConfig(
         callsign: String,
         channel: Int,
@@ -181,6 +191,8 @@ class MeshEngine(
             }
 
         sessionCallsigns.clear()
+
+        arbiter.clearRemote()
 
         if (
             running
@@ -229,6 +241,8 @@ class MeshEngine(
 
         startAnnouncements()
 
+        startFloorWatchdog()
+
         return true
     }
 
@@ -246,6 +260,10 @@ class MeshEngine(
         announceJob?.cancel()
         announceJob = null
 
+        floorJob?.cancel()
+        floorJob = null
+        arbiter.clear()
+
         synchronized(
             seenPackets
         ) {
@@ -260,116 +278,92 @@ class MeshEngine(
     }
 
     @Synchronized
-    fun beginTalking() {
+    fun beginTalking(): TalkRequestResult {
 
-        if (
-            talkingSessionId !=
-            0L
-        ) {
-            return
+        if (!running || roomCrypto == null) {
+            return TalkRequestResult.NotRunning
+        }
+
+        if (talkingSessionId != 0L) {
+            return TalkRequestResult.Granted
         }
 
         var session =
             secureRandom.nextLong()
 
-        if (
-            session == 0L
-        ) {
+        if (session == 0L) {
             session = 1L
         }
 
-        talkingSessionId =
-            session
+        val result =
+            arbiter.tryAcquireLocal(session)
 
-        talkingSequence =
-            0
+        if (result !is TalkRequestResult.Granted) {
+            return result
+        }
+
+        talkingSessionId = session
+        talkingSequence = 0
 
         sendLocalPacket(
-            type =
-                MeshPacketType
-                    .VOICE_START,
-
-            sessionId =
-                session,
-
-            sequence =
-                0,
-
+            type = MeshPacketType.VOICE_START,
+            sessionId = session,
+            sequence = 0,
             payload =
-                currentCallsign
-                    .toByteArray(
-                        Charsets.UTF_8
-                    )
+                currentCallsign.toByteArray(Charsets.UTF_8)
         )
+
+        return TalkRequestResult.Granted
     }
 
     @Synchronized
     fun sendVoiceFrame(
-        compressedAudio:
-            ByteArray
+        compressedAudio: ByteArray
     ) {
 
-        val session =
-            talkingSessionId
+        val session = talkingSessionId
 
-        if (
-            session == 0L
-        ) {
+        if (session == 0L) {
             return
         }
 
         talkingSequence++
 
+        arbiter.noteLocalSequence(
+            session,
+            talkingSequence
+        )
+
         sendLocalPacket(
-            type =
-                MeshPacketType
-                    .VOICE_DATA,
-
-            sessionId =
-                session,
-
-            sequence =
-                talkingSequence,
-
-            payload =
-                compressedAudio
+            type = MeshPacketType.VOICE_DATA,
+            sessionId = session,
+            sequence = talkingSequence,
+            payload = compressedAudio
         )
     }
 
     @Synchronized
     fun endTalking() {
 
-        val session =
-            talkingSessionId
+        val session = talkingSessionId
 
-        if (
-            session == 0L
-        ) {
+        if (session == 0L) {
             return
         }
 
         talkingSequence++
 
         sendLocalPacket(
-            type =
-                MeshPacketType
-                    .VOICE_END,
-
-            sessionId =
-                session,
-
-            sequence =
-                talkingSequence,
-
-            payload =
-                ByteArray(0)
+            type = MeshPacketType.VOICE_END,
+            sessionId = session,
+            sequence = talkingSequence,
+            payload = ByteArray(0)
         )
 
-        talkingSessionId =
-            0L
+        talkingSessionId = 0L
+        talkingSequence = 0
 
-        talkingSequence =
-            0
+        arbiter.releaseLocal(session)
     }
 
     fun sendAnnouncement() {
@@ -419,6 +413,29 @@ class MeshEngine(
 
                     delay(
                         ANNOUNCE_INTERVAL_MS
+                    )
+                }
+            }
+    }
+
+    private fun startFloorWatchdog() {
+
+        floorJob?.cancel()
+
+        floorJob =
+            scope.launch {
+
+                while (
+                    isActive &&
+                    running
+                ) {
+
+                    delay(
+                        FLOOR_CHECK_INTERVAL_MS
+                    )
+
+                    applyFloorUpdate(
+                        arbiter.expireStale()
                     )
                 }
             }
@@ -651,101 +668,138 @@ class MeshEngine(
                 }
             }
 
-            MeshPacketType
-                .VOICE_START -> {
+            MeshPacketType.VOICE_START -> {
 
                 val callsign =
-                    decodeCallsign(
-                        packet.payload
-                    )
+                    decodeCallsign(packet.payload)
 
-                sessionCallsigns[
-                    packet.sessionId
-                ] =
-                    callsign
-
-                MeshDiagnostics
-                    .updateTopologyNode(
-                        nodeId =
-                            packet.originId,
-                        callsign =
-                            callsign,
-                        hops =
-                            pathHops
-                    )
-
-                if (
-                    envelope.hops ==
-                    0
-                ) {
-
-                    transport
-                        .updatePeerIdentity(
-                            address =
-                                sourceAddress,
-                            nodeId =
-                                packet.originId,
-                            callsign =
-                                callsign
-                        )
+                if (sessionCallsigns.size > MAX_TRACKED_SESSIONS) {
+                    sessionCallsigns.clear()
                 }
 
-                onVoiceStart(
-                    packet.sessionId,
+                sessionCallsigns[packet.sessionId] =
                     callsign
+
+                MeshDiagnostics.updateTopologyNode(
+                    nodeId = packet.originId,
+                    callsign = callsign,
+                    hops = pathHops
+                )
+
+                if (envelope.hops == 0) {
+
+                    transport.updatePeerIdentity(
+                        address = sourceAddress,
+                        nodeId = packet.originId,
+                        callsign = callsign
+                    )
+                }
+
+                applyDecision(
+                    arbiter.onRemotePacket(
+                        sessionId = packet.sessionId,
+                        originId = packet.originId,
+                        callsign = callsign,
+                        sequence = packet.sequence
+                    )
                 )
             }
 
-            MeshPacketType
-                .VOICE_DATA -> {
+            MeshPacketType.VOICE_DATA -> {
 
                 val callsign =
-                    sessionCallsigns[
-                        packet.sessionId
-                    ]
+                    sessionCallsigns[packet.sessionId]
 
-                if (
-                    callsign != null
-                ) {
+                if (callsign != null) {
 
-                    MeshDiagnostics
-                        .updateTopologyNode(
-                            nodeId =
-                                packet.originId,
-                            callsign =
-                                callsign,
-                            hops =
-                                pathHops
-                        )
+                    MeshDiagnostics.updateTopologyNode(
+                        nodeId = packet.originId,
+                        callsign = callsign,
+                        hops = pathHops
+                    )
                 }
+
+                val decision =
+                    arbiter.onRemotePacket(
+                        sessionId = packet.sessionId,
+                        originId = packet.originId,
+                        callsign = callsign,
+                        sequence = packet.sequence
+                    )
+
+                applyDecision(decision)
 
                 /*
-                 * Do NOT discard packets
-                 * because sequence numbers
-                 * are out of order here.
-                 *
-                 * The jitter buffer handles
-                 * reordering later.
+                 * Out-of-order frames are still passed on;
+                 * the jitter buffer handles reordering.
                  */
-                onVoiceFrame(
-                    packet.sessionId,
-                    packet.sequence,
-                    packet.payload
-                )
+                if (decision.deliver) {
+
+                    onVoiceFrame(
+                        packet.sessionId,
+                        packet.sequence,
+                        packet.payload
+                    )
+                }
             }
 
-            MeshPacketType
-                .VOICE_END -> {
+            MeshPacketType.VOICE_END -> {
 
                 sessionCallsigns.remove(
                     packet.sessionId
                 )
 
-                onVoiceEnd(
-                    packet.sessionId,
-                    packet.sequence
+                applyFloorUpdate(
+                    update =
+                        arbiter.onRemoteEnd(
+                            packet.sessionId
+                        ),
+                    endSequence =
+                        packet.sequence
                 )
             }
+        }
+    }
+
+    private fun applyDecision(
+        decision: TalkerArbiter.PacketDecision
+    ) {
+
+        decision.preemptedLocal?.let { winner ->
+
+            endTalking()
+
+            onTransmitPreempted(
+                winner.callsign
+            )
+        }
+
+        applyFloorUpdate(
+            decision.update
+        )
+    }
+
+    private fun applyFloorUpdate(
+        update: TalkerArbiter.FloorUpdate,
+        endSequence: Int? = null
+    ) {
+
+        update.ended?.let { ended ->
+
+            onVoiceEnd(
+                ended.sessionId,
+                endSequence
+                    ?: (ended.highestSequence + 1)
+            )
+        }
+
+        update.started?.let { started ->
+
+            onVoiceStart(
+                started.sessionId,
+                started.callsign,
+                update.startSequence
+            )
         }
     }
 
@@ -831,5 +885,11 @@ class MeshEngine(
 
         private const val ANNOUNCE_INTERVAL_MS =
             15_000L
+
+        private const val FLOOR_CHECK_INTERVAL_MS =
+            250L
+
+        private const val MAX_TRACKED_SESSIONS =
+            64
     }
 }
