@@ -381,7 +381,8 @@ class BleMeshTransport(
         packetId: Long,
         encodedPacket: ByteArray,
         excludeAddress: String? = null,
-        highPriority: Boolean = false
+        highPriority: Boolean = false,
+        excludeNodeId: Long? = null
     ) {
 
         if (
@@ -398,6 +399,13 @@ class BleMeshTransport(
             if (
                 peer.address ==
                 excludeAddress
+            ) {
+                continue
+            }
+
+            if (
+                excludeNodeId != null &&
+                peer.nodeId == excludeNodeId
             ) {
                 continue
             }
