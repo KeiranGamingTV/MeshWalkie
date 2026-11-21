@@ -503,7 +503,9 @@ class MeshEngine(
             packetId =
                 envelope.packetId,
             encodedPacket =
-                encoded
+                encoded,
+            highPriority =
+                type != MeshPacketType.VOICE_DATA
         )
     }
 
