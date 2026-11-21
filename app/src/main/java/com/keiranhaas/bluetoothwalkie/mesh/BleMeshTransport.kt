@@ -342,6 +342,15 @@ class BleMeshTransport(
 
         peers.clear()
         connecting.clear()
+        pendingGatts.values.forEach {
+            try {
+                it.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        pendingGatts.clear()
+        connectStartedAt.clear()
         knownDevices.clear()
         scanRssi.clear()
 
@@ -368,10 +377,11 @@ class BleMeshTransport(
         scope.cancel()
     }
 
-    fun broadcast(
+     fun broadcast(
         packetId: Long,
         encodedPacket: ByteArray,
-        excludeAddress: String? = null
+        excludeAddress: String? = null,
+        highPriority: Boolean = false
     ) {
 
         if (
@@ -411,16 +421,20 @@ class BleMeshTransport(
                         maximumWrite
                 )
 
-            for (
-                fragment in
-                fragments
-            ) {
-
-                peer.sendQueue
-                    .trySend(
-                        fragment
+            val dropped =
+                peer.sendQueue.offer(
+                    OutgoingPacket(
+                        fragments =
+                            fragments,
+                        highPriority =
+                            highPriority
                     )
-            }
+                )
+
+            MeshDiagnostics
+                .recordCongestionDrops(
+                    dropped
+                )
         }
     }
 
@@ -583,11 +597,130 @@ class BleMeshTransport(
                         )
                     }
 
+                    checkLinkHealth()
+
                     delay(
                         RSSI_POLL_INTERVAL_MS
                     )
                 }
             }
+    }
+
+    /**
+     * Self-healing watchdog. Runs every few seconds.
+     *  - A connected peer with no successful write or RSSI reply for
+     *    LINK_DEAD_MS is torn down and reconnected.
+     *  - A connection attempt that never reaches "ready" within
+     *    CONNECT_TIMEOUT_MS is abandoned and retried.
+     */
+    private fun checkLinkHealth() {
+
+        val now =
+            System.currentTimeMillis()
+
+        for (
+            peer in
+            peers.values.toList()
+        ) {
+
+            if (
+                now - peer.lastLinkOkMs >
+                LINK_DEAD_MS
+            ) {
+                resetLink(peer)
+            }
+        }
+
+        for (
+            (address, startedAt) in
+            connectStartedAt.entries.toList()
+        ) {
+
+            if (
+                peers.containsKey(address)
+            ) {
+                pendingGatts.remove(address)
+                connectStartedAt.remove(address)
+                continue
+            }
+
+            if (
+                now - startedAt >
+                CONNECT_TIMEOUT_MS
+            ) {
+                abandonPending(address)
+            }
+        }
+    }
+
+    private fun resetLink(
+        peer: PeerConnection
+    ) {
+
+        MeshDiagnostics
+            .recordLinkReset()
+
+        removeConnectedPeer(
+            gatt =
+                peer.gatt,
+            reconnect =
+                true
+        )
+    }
+
+    private fun abandonPending(
+        address: String
+    ) {
+
+        val gatt =
+            pendingGatts.remove(
+                address
+            )
+
+        connectStartedAt.remove(
+            address
+        )
+
+        connecting.remove(
+            address
+        )
+
+        if (
+            gatt != null
+        ) {
+
+            try {
+                gatt.disconnect()
+            } catch (_: Exception) {
+            }
+
+            try {
+                gatt.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        knownDevices[
+            address
+        ]?.let {
+            device ->
+
+            scheduleReconnect(
+                device
+            )
+        }
+    }
+
+    private fun restartScanning() {
+
+        try {
+            scanner?.stopScan(
+                scanCallback
+            )
+        } catch (_: Exception) {
+        }
+
+        startScanning()
     }
 
     private fun connectToDevice(
@@ -672,6 +805,18 @@ class BleMeshTransport(
                 scheduleReconnect(
                     device
                 )
+
+            } else {
+
+                pendingGatts[
+                    address
+                ] =
+                    gatt
+
+                connectStartedAt[
+                    address
+                ] =
+                    System.currentTimeMillis()
             }
 
         } catch (_: Exception) {
@@ -695,11 +840,39 @@ class BleMeshTransport(
         val address =
             gatt.device.address
 
+        connecting.remove(
+            address
+        )
+
+        pendingGatts.remove(
+            address
+        )
+
+        connectStartedAt.remove(
+            address
+        )
+
+        val current =
+            peers[address]
+
         if (
-            peers.containsKey(
-                address
-            )
+            current != null
         ) {
+
+            /*
+             * Service discovery can repeat on the same
+             * connection. Only close a genuinely
+             * different duplicate connection.
+             */
+            if (
+                current.gatt !== gatt
+            ) {
+                try {
+                    gatt.close()
+                } catch (_: Exception) {
+                }
+            }
+
             return
         }
 
@@ -753,56 +926,9 @@ class BleMeshTransport(
 
         peer.senderJob =
             scope.launch {
-
-                for (
-                    frame in
-                    peer.sendQueue
-                ) {
-
-                    if (
-                        !started
-                    ) {
-                        break
-                    }
-
-                    var sent =
-                        false
-
-                    for (
-                        attempt in
-                        0 until
-                            WRITE_RETRY_COUNT
-                    ) {
-
-                        if (
-                            writeCharacteristic(
-                                peer =
-                                    peer,
-                                bytes =
-                                    frame
-                            )
-                        ) {
-                            sent = true
-                            break
-                        }
-
-                        delay(
-                            WRITE_RETRY_DELAY_MS
-                        )
-                    }
-
-                    if (
-                        sent
-                    ) {
-                        delay(
-                            WRITE_SPACING_MS
-                        )
-                    } else {
-                        delay(
-                            WRITE_FAILURE_PAUSE_MS
-                        )
-                    }
-                }
+                runSender(
+                    peer
+                )
             }
 
         onPeerCountChanged(
@@ -814,6 +940,164 @@ class BleMeshTransport(
         )
     }
 
+    private suspend fun runSender(
+        peer: PeerConnection
+    ) {
+
+        while (
+            started
+        ) {
+
+            val packet =
+                peer.sendQueue.take()
+                    ?: return
+
+            /*
+             * Stale voice is useless. Discard it
+             * instead of delaying everything behind it.
+             */
+            if (
+                !packet.highPriority &&
+                System.currentTimeMillis() -
+                    packet.enqueuedAtMs >
+                MAX_VOICE_AGE_MS
+            ) {
+
+                MeshDiagnostics
+                    .recordCongestionDrops(
+                        1
+                    )
+
+                continue
+            }
+
+            var complete =
+                true
+
+            for (
+                fragment in
+                packet.fragments
+            ) {
+
+                if (
+                    !sendFragment(
+                        peer,
+                        fragment
+                    )
+                ) {
+                    complete =
+                        false
+
+                    break
+                }
+            }
+
+            if (
+                complete
+            ) {
+
+                peer.consecutiveWriteFailures =
+                    0
+
+            } else {
+
+                peer.consecutiveWriteFailures++
+
+                if (
+                    peer.consecutiveWriteFailures >=
+                    MAX_CONSECUTIVE_WRITE_FAILURES
+                ) {
+
+                    resetLink(
+                        peer
+                    )
+
+                    return
+                }
+
+                delay(
+                    WRITE_FAILURE_PAUSE_MS
+                )
+            }
+        }
+    }
+
+    /**
+     * Writes one fragment and waits for Android's
+     * onCharacteristicWrite callback before the next,
+     * so we never overrun the stack's write buffer.
+     */
+    private suspend fun sendFragment(
+        peer: PeerConnection,
+        bytes: ByteArray
+    ): Boolean {
+
+        for (
+            attempt in
+            0 until WRITE_RETRY_COUNT
+        ) {
+
+            peer.writeAck
+                .tryReceive()
+
+            if (
+                !writeCharacteristic(
+                    peer =
+                        peer,
+                    bytes =
+                        bytes
+                )
+            ) {
+
+                delay(
+                    WRITE_RETRY_DELAY_MS
+                )
+
+                continue
+            }
+
+            if (
+                !USE_WRITE_ACK
+            ) {
+
+                delay(
+                    WRITE_SPACING_MS
+                )
+
+                return true
+            }
+
+            val status =
+                withTimeoutOrNull(
+                    WRITE_ACK_TIMEOUT_MS
+                ) {
+                    peer.writeAck
+                        .receiveCatching()
+                        .getOrNull()
+                }
+
+            if (
+                status ==
+                BluetoothGatt
+                    .GATT_SUCCESS
+            ) {
+
+                peer.lastLinkOkMs =
+                    System.currentTimeMillis()
+
+                return true
+            }
+
+            /*
+             * Timed out or failed. The write may still
+             * be in flight, so do not resend it.
+             */
+            return false
+        }
+
+        return false
+    }
+
     private fun removeConnectedPeer(
         gatt: BluetoothGatt,
         reconnect: Boolean
@@ -823,6 +1107,14 @@ class BleMeshTransport(
             gatt.device.address
 
         connecting.remove(
+            address
+        )
+
+        pendingGatts.remove(
+            address
+        )
+
+        connectStartedAt.remove(
             address
         )
 
@@ -888,6 +1180,7 @@ class BleMeshTransport(
     ) {
 
         peer.sendQueue.close()
+        peer.writeAck.close()
 
         peer.senderJob
             ?.cancel()
@@ -1140,9 +1433,23 @@ class BleMeshTransport(
             override fun onScanFailed(
                 errorCode: Int
             ) {
+
                 onStatus(
-                    "BLE scanning error $errorCode"
+                    "BLE scanning error $errorCode — retrying"
                 )
+
+                scope.launch {
+
+                    delay(
+                        SCAN_RESTART_DELAY_MS
+                    )
+
+                    if (
+                        started
+                    ) {
+                        restartScanning()
+                    }
+                }
             }
         }
 
@@ -1298,10 +1605,6 @@ class BleMeshTransport(
                     BluetoothProfile
                         .STATE_CONNECTED -> {
 
-                        connecting.remove(
-                            address
-                        )
-
                         if (
                             status !=
                             BluetoothGatt
@@ -1313,8 +1616,8 @@ class BleMeshTransport(
                             } catch (_: Exception) {
                             }
 
-                            scheduleReconnect(
-                                gatt.device
+                            abandonPending(
+                                address
                             )
 
                             return
@@ -1332,8 +1635,8 @@ class BleMeshTransport(
                                 } catch (_: Exception) {
                                 }
 
-                                scheduleReconnect(
-                                    gatt.device
+                                abandonPending(
+                                    address
                                 )
                             }
 
@@ -1344,8 +1647,8 @@ class BleMeshTransport(
                             } catch (_: Exception) {
                             }
 
-                            scheduleReconnect(
-                                gatt.device
+                            abandonPending(
+                                address
                             )
                         }
                     }
@@ -1361,6 +1664,21 @@ class BleMeshTransport(
                         )
                     }
                 }
+            }
+
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic:
+                    BluetoothGattCharacteristic,
+                status: Int
+            ) {
+
+                peers[
+                    gatt.device.address
+                ]?.writeAck
+                    ?.trySend(
+                        status
+                    )
             }
 
             override fun onServicesDiscovered(
@@ -1488,6 +1806,9 @@ class BleMeshTransport(
                 peer.rssi =
                     rssi
 
+                peer.lastLinkOkMs =
+                    System.currentTimeMillis()
+
                 MeshDiagnostics
                     .updatePeerLink(
                         address =
@@ -1532,10 +1853,20 @@ class BleMeshTransport(
         var callsign: String? =
             null
 
+        @Volatile
+        var lastLinkOkMs: Long =
+            System.currentTimeMillis()
+
+        @Volatile
+        var consecutiveWriteFailures: Int =
+            0
+
         val sendQueue =
-            Channel<ByteArray>(
-                capacity =
-                    SEND_QUEUE_SIZE
+            PeerSendQueue()
+
+        val writeAck =
+            Channel<Int>(
+                Channel.CONFLATED
             )
 
         var senderJob:
@@ -1575,8 +1906,34 @@ class BleMeshTransport(
         private const val MINIMUM_WRITE_SIZE =
             20
 
-        private const val SEND_QUEUE_SIZE =
-            1024
+        /*
+         * Pace writes by Android's onCharacteristicWrite
+         * callback. If voice stutters or link resets climb
+         * with phones close together, set this to false to
+         * return to the old fixed-delay pacing.
+         */
+        private const val USE_WRITE_ACK =
+            true
+
+        private const val WRITE_ACK_TIMEOUT_MS =
+            200L
+
+        /* Voice older than this when it reaches the front of the queue is dropped. */
+        private const val MAX_VOICE_AGE_MS =
+            600L
+
+        private const val MAX_CONSECUTIVE_WRITE_FAILURES =
+            25
+
+        /* No successful write or RSSI reply for this long means the link is dead. */
+        private const val LINK_DEAD_MS =
+            20_000L
+
+        private const val CONNECT_TIMEOUT_MS =
+            25_000L
+
+        private const val SCAN_RESTART_DELAY_MS =
+            6_000L
 
         private const val WRITE_SPACING_MS =
             3L
