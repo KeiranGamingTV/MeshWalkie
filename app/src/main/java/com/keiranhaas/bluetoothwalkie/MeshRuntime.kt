@@ -12,13 +12,17 @@ data class MeshUiState(
     val receivingFrom: String? = null,
     val callsign: String = "",
     val channel: Int = 1,
+    val roomCodeConfigured: Boolean = false,
     val status: String = "Mesh stopped",
     val bluetoothSupported: Boolean = true
 )
 
 object MeshRuntime {
 
-    private val mutableState = MutableStateFlow(MeshUiState())
+    private val mutableState =
+        MutableStateFlow(
+            MeshUiState()
+        )
 
     val state: StateFlow<MeshUiState> =
         mutableState.asStateFlow()
@@ -35,44 +39,78 @@ object MeshRuntime {
         }
     }
 
-    fun setPeerCount(count: Int) {
+    fun setPeerCount(
+        count: Int
+    ) {
         mutableState.update {
-            it.copy(peerCount = count)
+            it.copy(
+                peerCount = count
+            )
         }
     }
 
-    fun setTransmitting(transmitting: Boolean) {
+    fun setTransmitting(
+        transmitting: Boolean
+    ) {
         mutableState.update {
-            it.copy(transmitting = transmitting)
+            it.copy(
+                transmitting = transmitting
+            )
         }
     }
 
-    fun setReceivingFrom(callsign: String?) {
+    fun setReceivingFrom(
+        callsign: String?
+    ) {
         mutableState.update {
-            it.copy(receivingFrom = callsign)
+            it.copy(
+                receivingFrom = callsign
+            )
         }
     }
 
-    fun setStatus(status: String) {
+    fun setStatus(
+        status: String
+    ) {
         mutableState.update {
-            it.copy(status = status)
+            it.copy(
+                status = status
+            )
         }
     }
 
-    fun setBluetoothSupported(supported: Boolean) {
+    fun setBluetoothSupported(
+        supported: Boolean
+    ) {
         mutableState.update {
-            it.copy(bluetoothSupported = supported)
+            it.copy(
+                bluetoothSupported = supported
+            )
         }
     }
 
     fun setConfig(
         callsign: String,
-        channel: Int
+        channel: Int,
+        roomCodeConfigured: Boolean
     ) {
         mutableState.update {
             it.copy(
                 callsign = callsign,
-                channel = channel
+                channel = channel,
+                roomCodeConfigured =
+                    roomCodeConfigured
+            )
+        }
+    }
+
+    fun setRoomCodeConfigured(
+        configured: Boolean
+    ) {
+        mutableState.update {
+            it.copy(
+                roomCodeConfigured =
+                    configured
             )
         }
     }
