@@ -64,7 +64,11 @@ class BleMeshTransport(
         get() =
             bluetoothManager?.adapter
 
-    private val scope =
+    @Volatile
+    private var scope =
+        newScope()
+
+    private fun newScope() =
         CoroutineScope(
             SupervisorJob() +
                 Dispatchers.IO
@@ -174,6 +178,9 @@ class BleMeshTransport(
         ) {
             return true
         }
+
+        scope =
+            newScope()
 
         val localAdapter =
             adapter
