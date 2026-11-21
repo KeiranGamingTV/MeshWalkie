@@ -12,6 +12,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import com.keiranhaas.bluetoothwalkie.prefs.AppPreferences
+import com.keiranhaas.bluetoothwalkie.prefs.RoomCodeStore
 import com.keiranhaas.bluetoothwalkie.ui.MeshWalkieApp
 import com.keiranhaas.bluetoothwalkie.ui.theme.MeshWalkieTheme
 
@@ -21,19 +22,25 @@ class MainActivity :
     private lateinit var preferences:
         AppPreferences
 
+    private lateinit var roomCodeStore:
+        RoomCodeStore
+
     private val permissionLauncher =
         registerForActivityResult(
             ActivityResultContracts
                 .RequestMultiplePermissions()
         ) {
+
             if (
                 hasRequiredCorePermissions()
             ) {
                 startMeshService()
             } else {
-                MeshRuntime.setStatus(
-                    "Bluetooth and microphone permissions are required"
-                )
+
+                MeshRuntime
+                    .setStatus(
+                        "Bluetooth and microphone permissions are required"
+                    )
             }
         }
 
@@ -41,19 +48,35 @@ class MainActivity :
         savedInstanceState:
             Bundle?
     ) {
+
         super.onCreate(
             savedInstanceState
         )
 
         preferences =
-            AppPreferences(this)
+            AppPreferences(
+                this
+            )
+
+        roomCodeStore =
+            RoomCodeStore(
+                this
+            )
 
         MeshRuntime.setConfig(
             callsign =
                 preferences.callsign,
+
             channel =
-                preferences.channel
+                preferences.channel,
+
+            roomCodeConfigured =
+                roomCodeStore
+                    .hasRoomCode()
         )
+
+        val initialRoomCode =
+            roomCodeStore.load()
 
         setContent {
 
@@ -67,8 +90,28 @@ class MainActivity :
                     state =
                         state,
 
+                    initialRoomCode =
+                        initialRoomCode,
+
                     onStartMesh = {
-                        requestPermissionsAndStart()
+
+                        if (
+                            roomCodeStore
+                                .load()
+                                .length <
+                            RoomCodeStore
+                                .MIN_ROOM_CODE_LENGTH
+                        ) {
+
+                            MeshRuntime
+                                .setStatus(
+                                    "Set a room code of at least 8 characters first"
+                                )
+
+                        } else {
+
+                            requestPermissionsAndStart()
+                        }
                     },
 
                     onStopMesh = {
@@ -83,20 +126,29 @@ class MainActivity :
                         if (
                             hasRequiredCorePermissions()
                         ) {
+
                             sendServiceAction(
                                 MeshService
                                     .ACTION_PTT_DOWN
                             )
+
                         } else {
+
                             requestPermissionsAndStart()
                         }
                     },
 
                     onPttUp = {
-                        sendServiceAction(
-                            MeshService
-                                .ACTION_PTT_UP
-                        )
+
+                        if (
+                            state.networkRunning
+                        ) {
+
+                            sendServiceAction(
+                                MeshService
+                                    .ACTION_PTT_UP
+                            )
+                        }
                     },
 
                     onSaveCallsign = {
@@ -105,17 +157,28 @@ class MainActivity :
                         preferences.callsign =
                             callsign
 
-                        MeshRuntime.setConfig(
-                            callsign =
-                                preferences.callsign,
-                            channel =
-                                preferences.channel
-                        )
+                        MeshRuntime
+                            .setConfig(
+                                callsign =
+                                    preferences.callsign,
 
-                        sendServiceAction(
-                            MeshService
-                                .ACTION_CONFIG_CHANGED
-                        )
+                                channel =
+                                    preferences.channel,
+
+                                roomCodeConfigured =
+                                    roomCodeStore
+                                        .hasRoomCode()
+                            )
+
+                        if (
+                            state.networkRunning
+                        ) {
+
+                            sendServiceAction(
+                                MeshService
+                                    .ACTION_CONFIG_CHANGED
+                            )
+                        }
                     },
 
                     onChannelChanged = {
@@ -124,20 +187,66 @@ class MainActivity :
                         preferences.channel =
                             newChannel
 
-                        MeshRuntime.setConfig(
-                            callsign =
-                                preferences.callsign,
-                            channel =
-                                preferences.channel
-                        )
+                        MeshRuntime
+                            .setConfig(
+                                callsign =
+                                    preferences.callsign,
+
+                                channel =
+                                    preferences.channel,
+
+                                roomCodeConfigured =
+                                    roomCodeStore
+                                        .hasRoomCode()
+                            )
 
                         if (
                             state.networkRunning
                         ) {
+
                             sendServiceAction(
                                 MeshService
                                     .ACTION_CONFIG_CHANGED
                             )
+                        }
+                    },
+
+                    onSaveRoomCode = {
+                        roomCode ->
+
+                        val cleaned =
+                            roomCode.trim()
+
+                        if (
+                            cleaned.length >=
+                            RoomCodeStore
+                                .MIN_ROOM_CODE_LENGTH
+                        ) {
+
+                            roomCodeStore
+                                .save(
+                                    cleaned
+                                )
+
+                            MeshRuntime
+                                .setRoomCodeConfigured(
+                                    true
+                                )
+
+                            MeshRuntime
+                                .setStatus(
+                                    "Encrypted room code saved"
+                                )
+
+                            if (
+                                state.networkRunning
+                            ) {
+
+                                sendServiceAction(
+                                    MeshService
+                                        .ACTION_CONFIG_CHANGED
+                                )
+                            }
                         }
                     }
                 )
@@ -150,21 +259,30 @@ class MainActivity :
         val missing =
             requiredPermissions()
                 .filter {
-                    ContextCompat.checkSelfPermission(
-                        this,
-                        it
-                    ) !=
-                        PackageManager.PERMISSION_GRANTED
+                    permission ->
+
+                    ContextCompat
+                        .checkSelfPermission(
+                            this,
+                            permission
+                        ) !=
+                        PackageManager
+                            .PERMISSION_GRANTED
                 }
 
         if (
             missing.isEmpty()
         ) {
+
             startMeshService()
+
         } else {
-            permissionLauncher.launch(
-                missing.toTypedArray()
-            )
+
+            permissionLauncher
+                .launch(
+                    missing
+                        .toTypedArray()
+                )
         }
     }
 
@@ -175,6 +293,7 @@ class MainActivity :
                 this,
                 MeshService::class.java
             ).apply {
+
                 action =
                     MeshService
                         .ACTION_START
@@ -200,11 +319,25 @@ class MainActivity :
                     actionName
             }
 
-        ContextCompat
-            .startForegroundService(
-                this,
+        try {
+            startService(
                 intent
             )
+        } catch (_: Exception) {
+
+            if (
+                actionName !=
+                MeshService
+                    .ACTION_STOP
+            ) {
+
+                ContextCompat
+                    .startForegroundService(
+                        this,
+                        intent
+                    )
+            }
+        }
     }
 
     private fun hasRequiredCorePermissions():
@@ -212,11 +345,15 @@ class MainActivity :
 
         return corePermissions()
             .all {
-                ContextCompat.checkSelfPermission(
-                    this,
-                    it
-                ) ==
-                    PackageManager.PERMISSION_GRANTED
+                permission ->
+
+                ContextCompat
+                    .checkSelfPermission(
+                        this,
+                        permission
+                    ) ==
+                    PackageManager
+                        .PERMISSION_GRANTED
             }
     }
 
@@ -267,6 +404,7 @@ class MainActivity :
             Build.VERSION.SDK_INT >=
             Build.VERSION_CODES.TIRAMISU
         ) {
+
             permissions +=
                 Manifest.permission
                     .POST_NOTIFICATIONS
