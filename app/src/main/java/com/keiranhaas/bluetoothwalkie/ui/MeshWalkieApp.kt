@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -26,10 +25,13 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -37,11 +39,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.keiranhaas.bluetoothwalkie.MeshUiState
+import com.keiranhaas.bluetoothwalkie.mesh.MeshDiagnostics
 import com.keiranhaas.bluetoothwalkie.prefs.AppPreferences
+import com.keiranhaas.bluetoothwalkie.prefs.RoomCodeStore
 
 @OptIn(
     ExperimentalMaterial3Api::class
@@ -49,38 +54,33 @@ import com.keiranhaas.bluetoothwalkie.prefs.AppPreferences
 @Composable
 fun MeshWalkieApp(
     state: MeshUiState,
+    initialRoomCode: String,
     onStartMesh: () -> Unit,
     onStopMesh: () -> Unit,
     onPttDown: () -> Unit,
     onPttUp: () -> Unit,
-    onSaveCallsign: (
-        String
-    ) -> Unit,
-    onChannelChanged: (
-        Int
-    ) -> Unit
+    onSaveCallsign:
+        (String) -> Unit,
+    onChannelChanged:
+        (Int) -> Unit,
+    onSaveRoomCode:
+        (String) -> Unit
 ) {
 
-    var callsign by
+    val diagnostics by
+        MeshDiagnostics.state
+            .collectAsState()
+
+    var selectedScreen by
         rememberSaveable {
-            mutableStateOf(
-                state.callsign
+            mutableIntStateOf(
+                0
             )
         }
 
-    LaunchedEffect(
-        state.callsign
-    ) {
-        if (
-            !state.transmitting
-        ) {
-            callsign =
-                state.callsign
-        }
-    }
-
     Scaffold(
         topBar = {
+
             TopAppBar(
                 title = {
                     Text(
@@ -96,162 +96,399 @@ fun MeshWalkieApp(
             modifier =
                 Modifier
                     .fillMaxSize()
-                    .padding(padding)
-                    .verticalScroll(
-                        rememberScrollState()
+                    .padding(
+                        padding
                     )
-                    .padding(20.dp),
-            horizontalAlignment =
-                Alignment.CenterHorizontally,
-            verticalArrangement =
-                Arrangement.spacedBy(
-                    16.dp
-                )
         ) {
 
-            StatusCard(
-                state
-            )
-
-            SettingsCard(
-                state = state,
-                callsign = callsign,
-                onCallsignChanged = {
-                    callsign = it
-                        .take(
-                            AppPreferences
-                                .MAX_CALLSIGN_LENGTH
-                        )
-                },
-                onSaveCallsign = {
-                    onSaveCallsign(
-                        callsign
-                    )
-                },
-                onChannelChanged =
-                    onChannelChanged
-            )
-
-            if (
-                !state.bluetoothSupported
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            horizontal =
+                                8.dp
+                        ),
+                horizontalArrangement =
+                    Arrangement
+                        .SpaceEvenly
             ) {
 
-                Card(
-                    modifier =
-                        Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text =
-                            "This phone does not appear to support the Bluetooth LE advertising/scanning roles required by MeshWalkie.",
-                        modifier =
-                            Modifier.padding(
-                                16.dp
-                            ),
-                        color =
-                            MaterialTheme
-                                .colorScheme
-                                .error
-                    )
-                }
-            }
+                ScreenButton(
+                    text =
+                        "Radio",
 
-            if (
-                state.networkRunning
-            ) {
+                    selected =
+                        selectedScreen ==
+                            0,
 
-                OutlinedButton(
-                    onClick =
-                        onStopMesh,
-                    modifier =
-                        Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        "Stop Mesh"
-                    )
-                }
-
-            } else {
-
-                Button(
-                    onClick =
-                        onStartMesh,
-                    enabled =
-                        state.bluetoothSupported,
-                    modifier =
-                        Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        "Start Mesh"
-                    )
-                }
-            }
-
-            Spacer(
-                Modifier.height(
-                    10.dp
+                    onClick = {
+                        selectedScreen =
+                            0
+                    }
                 )
-            )
 
-            PushToTalkButton(
-                enabled =
-                    state.networkRunning &&
-                        state.bluetoothSupported,
-                transmitting =
-                    state.transmitting,
-                onPttDown =
-                    onPttDown,
-                onPttUp =
-                    onPttUp
-            )
+                ScreenButton(
+                    text =
+                        "Topology",
 
-            state.receivingFrom
-                ?.let {
-                    callsignName ->
+                    selected =
+                        selectedScreen ==
+                            1,
 
-                    Text(
-                        text =
-                            "Receiving: $callsignName",
-                        fontSize =
-                            20.sp,
-                        fontWeight =
-                            FontWeight.Bold,
-                        color =
-                            MaterialTheme
-                                .colorScheme
-                                .primary
-                    )
-                }
-
-            Spacer(
-                Modifier.height(
-                    8.dp
+                    onClick = {
+                        selectedScreen =
+                            1
+                    }
                 )
-            )
+
+                ScreenButton(
+                    text =
+                        "Diagnostics",
+
+                    selected =
+                        selectedScreen ==
+                            2,
+
+                    onClick = {
+                        selectedScreen =
+                            2
+                    }
+                )
+            }
 
             HorizontalDivider()
 
-            Text(
-                text =
-                    "MeshWalkie uses nearby phones as Bluetooth relays. No internet connection is required.",
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodyMedium,
-                textAlign =
-                    TextAlign.Center
-            )
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+            ) {
 
+                when (
+                    selectedScreen
+                ) {
+
+                    0 -> {
+
+                        RadioScreen(
+                            state =
+                                state,
+
+                            initialRoomCode =
+                                initialRoomCode,
+
+                            onStartMesh =
+                                onStartMesh,
+
+                            onStopMesh =
+                                onStopMesh,
+
+                            onPttDown =
+                                onPttDown,
+
+                            onPttUp =
+                                onPttUp,
+
+                            onSaveCallsign =
+                                onSaveCallsign,
+
+                            onChannelChanged =
+                                onChannelChanged,
+
+                            onSaveRoomCode =
+                                onSaveRoomCode
+                        )
+                    }
+
+                    1 -> {
+
+                        TopologyScreen(
+                            state =
+                                state,
+
+                            diagnostics =
+                                diagnostics
+                        )
+                    }
+
+                    else -> {
+
+                        DiagnosticsScreen(
+                            state =
+                                state,
+
+                            diagnostics =
+                                diagnostics
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScreenButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+
+    if (
+        selected
+    ) {
+
+        Button(
+            onClick =
+                onClick
+        ) {
             Text(
-                text =
-                    "Hold the PTT button while speaking. Release it when finished.",
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodySmall,
-                textAlign =
-                    TextAlign.Center
+                text
             )
         }
+
+    } else {
+
+        TextButton(
+            onClick =
+                onClick
+        ) {
+            Text(
+                text
+            )
+        }
+    }
+}
+
+@Composable
+private fun RadioScreen(
+    state: MeshUiState,
+    initialRoomCode: String,
+    onStartMesh: () -> Unit,
+    onStopMesh: () -> Unit,
+    onPttDown: () -> Unit,
+    onPttUp: () -> Unit,
+    onSaveCallsign:
+        (String) -> Unit,
+    onChannelChanged:
+        (Int) -> Unit,
+    onSaveRoomCode:
+        (String) -> Unit
+) {
+
+    var callsign by
+        rememberSaveable {
+            mutableStateOf(
+                state.callsign
+            )
+        }
+
+    var roomCode by
+        rememberSaveable {
+            mutableStateOf(
+                initialRoomCode
+            )
+        }
+
+    LaunchedEffect(
+        state.callsign
+    ) {
+
+        if (
+            !state.transmitting
+        ) {
+            callsign =
+                state.callsign
+        }
+    }
+
+    Column(
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(
+                    rememberScrollState()
+                )
+                .padding(
+                    20.dp
+                ),
+        horizontalAlignment =
+            Alignment.CenterHorizontally,
+        verticalArrangement =
+            Arrangement.spacedBy(
+                16.dp
+            )
+    ) {
+
+        StatusCard(
+            state
+        )
+
+        SettingsCard(
+            state =
+                state,
+
+            callsign =
+                callsign,
+
+            roomCode =
+                roomCode,
+
+            onCallsignChanged = {
+                callsign =
+                    it.take(
+                        AppPreferences
+                            .MAX_CALLSIGN_LENGTH
+                    )
+            },
+
+            onRoomCodeChanged = {
+                roomCode =
+                    it
+            },
+
+            onSaveCallsign = {
+                onSaveCallsign(
+                    callsign
+                )
+            },
+
+            onSaveRoomCode = {
+                onSaveRoomCode(
+                    roomCode
+                )
+            },
+
+            onChannelChanged =
+                onChannelChanged
+        )
+
+        if (
+            !state.bluetoothSupported
+        ) {
+
+            Card(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+            ) {
+
+                Text(
+                    text =
+                        "This phone does not appear to support the BLE advertising/scanning roles required by MeshWalkie.",
+
+                    modifier =
+                        Modifier.padding(
+                            16.dp
+                        ),
+
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .error
+                )
+            }
+        }
+
+        if (
+            state.networkRunning
+        ) {
+
+            OutlinedButton(
+                onClick =
+                    onStopMesh,
+
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+            ) {
+
+                Text(
+                    "Stop Mesh"
+                )
+            }
+
+        } else {
+
+            Button(
+                onClick =
+                    onStartMesh,
+
+                enabled =
+                    state
+                        .bluetoothSupported &&
+                    state
+                        .roomCodeConfigured,
+
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+            ) {
+
+                Text(
+                    "Start Encrypted Mesh"
+                )
+            }
+        }
+
+        Spacer(
+            Modifier.height(
+                8.dp
+            )
+        )
+
+        PushToTalkButton(
+            enabled =
+                state.networkRunning &&
+                    state
+                        .bluetoothSupported,
+
+            transmitting =
+                state.transmitting,
+
+            onPttDown =
+                onPttDown,
+
+            onPttUp =
+                onPttUp
+        )
+
+        state.receivingFrom
+            ?.let {
+                callsignName ->
+
+                Text(
+                    text =
+                        "Receiving: $callsignName",
+
+                    fontSize =
+                        20.sp,
+
+                    fontWeight =
+                        FontWeight.Bold,
+
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .primary
+                )
+            }
+
+        HorizontalDivider()
+
+        Text(
+            text =
+                "Voice and control data are protected with AES-256-GCM. Phones must use the same channel and exact room code to hear one another.",
+
+            style =
+                MaterialTheme
+                    .typography
+                    .bodyMedium,
+
+            textAlign =
+                TextAlign.Center
+        )
     }
 }
 
@@ -262,7 +499,8 @@ private fun StatusCard(
 
     Card(
         modifier =
-            Modifier.fillMaxWidth()
+            Modifier
+                .fillMaxWidth()
     ) {
 
         Column(
@@ -281,20 +519,22 @@ private fun StatusCard(
                     if (
                         state.networkRunning
                     ) {
-                        "Mesh Online"
+                        "Encrypted Mesh Online"
                     } else {
                         "Mesh Offline"
                     },
+
                 style =
                     MaterialTheme
                         .typography
                         .titleLarge,
+
                 fontWeight =
                     FontWeight.Bold
             )
 
             Text(
-                "Connected peers: ${state.peerCount}"
+                "Direct peers: ${state.peerCount}"
             )
 
             Text(
@@ -307,7 +547,20 @@ private fun StatusCard(
 
             Text(
                 text =
+                    if (
+                        state
+                            .roomCodeConfigured
+                    ) {
+                        "Room encryption: configured"
+                    } else {
+                        "Room encryption: not configured"
+                    }
+            )
+
+            Text(
+                text =
                     state.status,
+
                 style =
                     MaterialTheme
                         .typography
@@ -321,18 +574,21 @@ private fun StatusCard(
 private fun SettingsCard(
     state: MeshUiState,
     callsign: String,
-    onCallsignChanged: (
-        String
-    ) -> Unit,
+    roomCode: String,
+    onCallsignChanged:
+        (String) -> Unit,
+    onRoomCodeChanged:
+        (String) -> Unit,
     onSaveCallsign: () -> Unit,
-    onChannelChanged: (
-        Int
-    ) -> Unit
+    onSaveRoomCode: () -> Unit,
+    onChannelChanged:
+        (Int) -> Unit
 ) {
 
     Card(
         modifier =
-            Modifier.fillMaxWidth()
+            Modifier
+                .fillMaxWidth()
     ) {
 
         Column(
@@ -348,11 +604,13 @@ private fun SettingsCard(
 
             Text(
                 text =
-                    "Radio Settings",
+                    "Radio & Encryption",
+
                 style =
                     MaterialTheme
                         .typography
                         .titleMedium,
+
                 fontWeight =
                     FontWeight.Bold
             )
@@ -360,12 +618,17 @@ private fun SettingsCard(
             OutlinedTextField(
                 value =
                     callsign,
+
                 onValueChange =
                     onCallsignChanged,
+
                 modifier =
-                    Modifier.fillMaxWidth(),
+                    Modifier
+                        .fillMaxWidth(),
+
                 singleLine =
                     true,
+
                 label = {
                     Text(
                         "Callsign"
@@ -376,40 +639,107 @@ private fun SettingsCard(
             Button(
                 onClick =
                     onSaveCallsign,
+
                 modifier =
-                    Modifier.fillMaxWidth()
+                    Modifier
+                        .fillMaxWidth()
             ) {
+
                 Text(
                     "Save Callsign"
                 )
             }
 
+            OutlinedTextField(
+                value =
+                    roomCode,
+
+                onValueChange =
+                    onRoomCodeChanged,
+
+                modifier =
+                    Modifier
+                        .fillMaxWidth(),
+
+                singleLine =
+                    true,
+
+                visualTransformation =
+                    PasswordVisualTransformation(),
+
+                label = {
+                    Text(
+                        "Shared Room Code"
+                    )
+                },
+
+                supportingText = {
+
+                    Text(
+                        "Minimum 8 characters. A longer phrase is recommended."
+                    )
+                }
+            )
+
+            Button(
+                onClick =
+                    onSaveRoomCode,
+
+                enabled =
+                    roomCode
+                        .trim()
+                        .length >=
+                    RoomCodeStore
+                        .MIN_ROOM_CODE_LENGTH,
+
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+            ) {
+
+                Text(
+                    "Save Encrypted Room"
+                )
+            }
+
             Row(
                 modifier =
-                    Modifier.fillMaxWidth(),
+                    Modifier
+                        .fillMaxWidth(),
+
                 verticalAlignment =
-                    Alignment.CenterVertically,
+                    Alignment
+                        .CenterVertically,
+
                 horizontalArrangement =
-                    Arrangement.SpaceBetween
+                    Arrangement
+                        .SpaceBetween
             ) {
 
                 OutlinedButton(
                     onClick = {
+
                         onChannelChanged(
-                            state.channel - 1
+                            state.channel -
+                                1
                         )
                     },
+
                     enabled =
                         state.channel >
                             AppPreferences
                                 .MIN_CHANNEL
                 ) {
-                    Text("−")
+
+                    Text(
+                        "−"
+                    )
                 }
 
                 Column(
                     horizontalAlignment =
-                        Alignment.CenterHorizontally
+                        Alignment
+                            .CenterHorizontally
                 ) {
 
                     Text(
@@ -418,9 +748,12 @@ private fun SettingsCard(
 
                     Text(
                         text =
-                            state.channel.toString(),
+                            state.channel
+                                .toString(),
+
                         fontSize =
                             28.sp,
+
                         fontWeight =
                             FontWeight.Bold
                     )
@@ -428,16 +761,22 @@ private fun SettingsCard(
 
                 OutlinedButton(
                     onClick = {
+
                         onChannelChanged(
-                            state.channel + 1
+                            state.channel +
+                                1
                         )
                     },
+
                     enabled =
                         state.channel <
                             AppPreferences
                                 .MAX_CHANNEL
                 ) {
-                    Text("+")
+
+                    Text(
+                        "+"
+                    )
                 }
             }
         }
@@ -474,8 +813,10 @@ private fun PushToTalkButton(
     Surface(
         shape =
             CircleShape,
+
         tonalElevation =
             8.dp,
+
         modifier =
             Modifier
                 .size(
@@ -488,7 +829,9 @@ private fun PushToTalkButton(
                     detectTapGestures(
                         onPress = {
 
-                            if (!enabled) {
+                            if (
+                                !enabled
+                            ) {
                                 return@detectTapGestures
                             }
 
@@ -512,13 +855,15 @@ private fun PushToTalkButton(
                         background,
                         CircleShape
                     ),
+
             contentAlignment =
                 Alignment.Center
         ) {
 
             Column(
                 horizontalAlignment =
-                    Alignment.CenterHorizontally
+                    Alignment
+                        .CenterHorizontally
             ) {
 
                 Text(
@@ -530,8 +875,10 @@ private fun PushToTalkButton(
                         } else {
                             "PUSH"
                         },
+
                     fontWeight =
                         FontWeight.Bold,
+
                     fontSize =
                         22.sp
                 )
@@ -545,6 +892,7 @@ private fun PushToTalkButton(
                         } else {
                             "TO TALK"
                         },
+
                     fontSize =
                         18.sp
                 )
