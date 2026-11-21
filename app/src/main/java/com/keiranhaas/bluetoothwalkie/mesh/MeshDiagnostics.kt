@@ -48,6 +48,9 @@ data class MeshDiagnosticsState(
 
     val lateFramesDropped: Long = 0,
 
+    val congestionDrops: Long = 0,
+    val linkResets: Long = 0,
+
     val lastHopCount: Int = 0,
     val maximumHopCount: Int = 0,
     val averageHopCount: Double = 0.0
@@ -456,6 +459,42 @@ object MeshDiagnostics {
                         mutableState
                             .value
                             .lateFramesDropped +
+                            1
+                )
+        }
+    }
+
+    fun recordCongestionDrops(
+        count: Int
+    ) {
+
+        if (
+            count <= 0
+        ) {
+            return
+        }
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    congestionDrops =
+                        mutableState
+                            .value
+                            .congestionDrops +
+                            count
+                )
+        }
+    }
+
+    fun recordLinkReset() {
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    linkResets =
+                        mutableState
+                            .value
+                            .linkResets +
                             1
                 )
         }
