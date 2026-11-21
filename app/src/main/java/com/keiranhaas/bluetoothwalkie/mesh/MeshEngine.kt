@@ -476,6 +476,9 @@ class MeshEngine(
                     payload
             )
 
+        val control =
+            type != MeshPacketType.VOICE_DATA
+
         val envelope =
             MeshPacketCodec.seal(
                 packet =
@@ -483,7 +486,14 @@ class MeshEngine(
                 crypto =
                     crypto,
                 initialTtl =
-                    INITIAL_TTL
+                    INITIAL_TTL,
+                flags =
+                    if (control) {
+                        MeshPacketCodec
+                            .FLAG_CONTROL
+                    } else {
+                        0
+                    }
             )
 
         markSeen(
@@ -505,7 +515,7 @@ class MeshEngine(
             encodedPacket =
                 encoded,
             highPriority =
-                type != MeshPacketType.VOICE_DATA
+                control
         )
     }
 
@@ -617,7 +627,13 @@ class MeshEngine(
                         ),
 
                 excludeAddress =
-                    sourceAddress
+                    sourceAddress,
+
+                highPriority =
+                    relayed.isControl,
+
+                excludeNodeId =
+                    relayed.originId
             )
         }
     }
