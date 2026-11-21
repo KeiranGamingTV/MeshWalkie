@@ -47,6 +47,10 @@ import com.keiranhaas.bluetoothwalkie.MeshUiState
 import com.keiranhaas.bluetoothwalkie.mesh.MeshDiagnostics
 import com.keiranhaas.bluetoothwalkie.prefs.AppPreferences
 import com.keiranhaas.bluetoothwalkie.prefs.RoomCodeStore
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 
 @OptIn(
     ExperimentalMaterial3Api::class
@@ -303,6 +307,47 @@ private fun RadioScreen(
         }
     }
 
+    val haptics =
+        LocalHapticFeedback.current
+
+    var lastNoticeSerial by
+        remember {
+            mutableLongStateOf(
+                state.floorNoticeSerial
+            )
+        }
+
+    LaunchedEffect(
+        state.transmitting
+    ) {
+
+        if (
+            state.transmitting
+        ) {
+            haptics.performHapticFeedback(
+                HapticFeedbackType.Confirm
+            )
+        }
+    }
+
+    LaunchedEffect(
+        state.floorNoticeSerial
+    ) {
+
+        if (
+            state.floorNoticeSerial !=
+            lastNoticeSerial
+        ) {
+
+            lastNoticeSerial =
+                state.floorNoticeSerial
+
+            haptics.performHapticFeedback(
+                HapticFeedbackType.Reject
+            )
+        }
+    }
+
     Column(
         modifier =
             Modifier
@@ -441,11 +486,13 @@ private fun RadioScreen(
         PushToTalkButton(
             enabled =
                 state.networkRunning &&
-                    state
-                        .bluetoothSupported,
+                    state.bluetoothSupported,
 
             transmitting =
                 state.transmitting,
+
+            busyCallsign =
+                state.receivingFrom,
 
             onPttDown =
                 onPttDown,
@@ -787,9 +834,14 @@ private fun SettingsCard(
 private fun PushToTalkButton(
     enabled: Boolean,
     transmitting: Boolean,
+    busyCallsign: String?,
     onPttDown: () -> Unit,
     onPttUp: () -> Unit
 ) {
+
+    val busy =
+        !transmitting &&
+            busyCallsign != null
 
     val background =
         when {
@@ -803,6 +855,11 @@ private fun PushToTalkButton(
                 MaterialTheme
                     .colorScheme
                     .errorContainer
+
+            busy ->
+                MaterialTheme
+                    .colorScheme
+                    .tertiaryContainer
 
             else ->
                 MaterialTheme
@@ -868,12 +925,15 @@ private fun PushToTalkButton(
 
                 Text(
                     text =
-                        if (
-                            transmitting
-                        ) {
-                            "TRANSMITTING"
-                        } else {
-                            "PUSH"
+                        when {
+                            transmitting ->
+                                "TRANSMITTING"
+
+                            busy ->
+                                "CHANNEL BUSY"
+
+                            else ->
+                                "PUSH"
                         },
 
                     fontWeight =
@@ -885,12 +945,15 @@ private fun PushToTalkButton(
 
                 Text(
                     text =
-                        if (
-                            transmitting
-                        ) {
-                            "Release to stop"
-                        } else {
-                            "TO TALK"
+                        when {
+                            transmitting ->
+                                "Release to stop"
+
+                            busy ->
+                                "$busyCallsign is talking"
+
+                            else ->
+                                "TO TALK"
                         },
 
                     fontSize =
