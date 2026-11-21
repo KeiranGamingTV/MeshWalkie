@@ -1,6 +1,14 @@
 package com.keiranhaas.bluetoothwalkie.mesh
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.security.SecureRandom
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -9,21 +17,26 @@ import java.util.concurrent.atomic.AtomicLong
 class MeshEngine(
     context: Context,
     private val nodeId: Long,
-    private val channelProvider: () -> Int,
-    private val callsignProvider: () -> String,
-    private val onVoiceFrame: (
-        ByteArray
-    ) -> Unit,
-    private val onIncomingStarted: (
-        String
-    ) -> Unit,
-    private val onIncomingEnded: () -> Unit,
-    onPeerCountChanged: (
-        Int
-    ) -> Unit,
-    onStatus: (
-        String
-    ) -> Unit
+    private val onVoiceStart:
+        (
+            sessionId: Long,
+            callsign: String
+        ) -> Unit,
+    private val onVoiceFrame:
+        (
+            sessionId: Long,
+            sequence: Int,
+            frame: ByteArray
+        ) -> Unit,
+    private val onVoiceEnd:
+        (
+            sessionId: Long,
+            endSequence: Int
+        ) -> Unit,
+    onPeerCountChanged:
+        (Int) -> Unit,
+    onStatus:
+        (String) -> Unit
 ) {
 
     private data class SeenKey(
@@ -39,13 +52,19 @@ class MeshEngine(
             secureRandom.nextLong()
         )
 
+    private val scope =
+        CoroutineScope(
+            SupervisorJob() +
+                Dispatchers.IO
+        )
+
     private val seenPackets =
         object :
             LinkedHashMap<
                 SeenKey,
                 Long
             >(
-                2048,
+                4096,
                 0.75f,
                 true
             ) {
@@ -57,6 +76,7 @@ class MeshEngine(
                         Long
                     >?
             ): Boolean {
+
                 return size >
                     SEEN_PACKET_LIMIT
             }
@@ -68,45 +88,163 @@ class MeshEngine(
             String
         >()
 
-    private val lastSequences =
-        ConcurrentHashMap<
-            Long,
-            Int
-        >()
-
     private val transport =
         BleMeshTransport(
-            context = context,
-            onPacketReceived =
-                ::handleIncomingBytes,
+            context =
+                context,
+
+            onPacketReceived = {
+                sourceAddress,
+                packet ->
+
+                handleIncomingBytes(
+                    sourceAddress =
+                        sourceAddress,
+                    bytes =
+                        packet
+                )
+            },
+
             onPeerCountChanged =
                 onPeerCountChanged,
+
             onStatus =
                 onStatus
         )
 
     @Volatile
-    private var talkingSessionId:
-        Long = 0L
+    private var roomCrypto:
+        RoomCrypto? =
+        null
+
+    @Volatile
+    private var currentChannel =
+        1
+
+    @Volatile
+    private var currentCallsign =
+        "Radio"
+
+    @Volatile
+    private var running =
+        false
+
+    @Volatile
+    private var talkingSessionId =
+        0L
 
     @Volatile
     private var talkingSequence =
         0
 
+    private var announceJob:
+        Job? =
+        null
+
+    fun updateConfig(
+        callsign: String,
+        channel: Int,
+        roomCode: String
+    ) {
+
+        currentCallsign =
+            callsign
+                .trim()
+                .take(20)
+                .ifBlank {
+                    "Radio"
+                }
+
+        currentChannel =
+            channel.coerceIn(
+                1,
+                16
+            )
+
+        roomCrypto =
+            if (
+                roomCode.isBlank()
+            ) {
+                null
+            } else {
+
+                try {
+                    RoomCrypto.derive(
+                        roomCode =
+                            roomCode,
+                        channel =
+                            currentChannel
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+            }
+
+        sessionCallsigns.clear()
+
+        if (
+            running
+        ) {
+            sendAnnouncement()
+        }
+    }
+
     fun isBluetoothAvailable():
         Boolean {
+
         return transport
             .isBluetoothAvailable
     }
 
+    fun hasEncryptionKey():
+        Boolean {
+
+        return roomCrypto !=
+            null
+    }
+
     fun start():
         Boolean {
-        return transport.start()
+
+        if (
+            roomCrypto == null
+        ) {
+            return false
+        }
+
+        MeshDiagnostics
+            .resetForNewRun()
+
+        val started =
+            transport.start()
+
+        if (
+            !started
+        ) {
+            return false
+        }
+
+        running =
+            true
+
+        startAnnouncements()
+
+        return true
     }
 
     fun stop() {
-        talkingSessionId = 0L
-        talkingSequence = 0
+
+        running =
+            false
+
+        talkingSessionId =
+            0L
+
+        talkingSequence =
+            0
+
+        announceJob?.cancel()
+        announceJob = null
 
         synchronized(
             seenPackets
@@ -115,16 +253,18 @@ class MeshEngine(
         }
 
         sessionCallsigns.clear()
-        lastSequences.clear()
 
         transport.stop()
+
+        scope.cancel()
     }
 
     @Synchronized
     fun beginTalking() {
 
         if (
-            talkingSessionId != 0L
+            talkingSessionId !=
+            0L
         ) {
             return
         }
@@ -146,14 +286,17 @@ class MeshEngine(
 
         sendLocalPacket(
             type =
-                MeshPacketType.VOICE_START,
+                MeshPacketType
+                    .VOICE_START,
+
             sessionId =
                 session,
+
             sequence =
-                talkingSequence,
+                0,
+
             payload =
-                callsignProvider()
-                    .take(20)
+                currentCallsign
                     .toByteArray(
                         Charsets.UTF_8
                     )
@@ -179,11 +322,15 @@ class MeshEngine(
 
         sendLocalPacket(
             type =
-                MeshPacketType.VOICE_DATA,
+                MeshPacketType
+                    .VOICE_DATA,
+
             sessionId =
                 session,
+
             sequence =
                 talkingSequence,
+
             payload =
                 compressedAudio
         )
@@ -205,11 +352,15 @@ class MeshEngine(
 
         sendLocalPacket(
             type =
-                MeshPacketType.VOICE_END,
+                MeshPacketType
+                    .VOICE_END,
+
             sessionId =
                 session,
+
             sequence =
                 talkingSequence,
+
             payload =
                 ByteArray(0)
         )
@@ -221,6 +372,58 @@ class MeshEngine(
             0
     }
 
+    fun sendAnnouncement() {
+
+        if (
+            !running
+        ) {
+            return
+        }
+
+        sendLocalPacket(
+            type =
+                MeshPacketType
+                    .NODE_ANNOUNCE,
+
+            sessionId =
+                0L,
+
+            sequence =
+                0,
+
+            payload =
+                currentCallsign
+                    .toByteArray(
+                        Charsets.UTF_8
+                    )
+        )
+    }
+
+    private fun startAnnouncements() {
+
+        announceJob?.cancel()
+
+        announceJob =
+            scope.launch {
+
+                delay(
+                    1_000L
+                )
+
+                while (
+                    isActive &&
+                    running
+                ) {
+
+                    sendAnnouncement()
+
+                    delay(
+                        ANNOUNCE_INTERVAL_MS
+                    )
+                }
+            }
+    }
+
     private fun sendLocalPacket(
         type: MeshPacketType,
         sessionId: Long,
@@ -228,132 +431,273 @@ class MeshEngine(
         payload: ByteArray
     ) {
 
+        val crypto =
+            roomCrypto
+                ?: return
+
         val packet =
             MeshPacket(
-                type = type,
-                ttl = MAX_HOPS,
+                type =
+                    type,
+
                 channel =
-                    channelProvider()
-                        .coerceIn(
-                            1,
-                            16
-                        ),
+                    currentChannel,
+
                 originId =
                     nodeId,
+
                 packetId =
                     nextPacketId(),
+
                 sessionId =
                     sessionId,
+
                 sequence =
                     sequence,
+
                 payload =
                     payload
             )
 
+        val envelope =
+            MeshPacketCodec.seal(
+                packet =
+                    packet,
+                crypto =
+                    crypto,
+                initialTtl =
+                    INITIAL_TTL
+            )
+
         markSeen(
-            packet
+            envelope
         )
 
+        val encoded =
+            MeshPacketCodec
+                .encodeEnvelope(
+                    envelope
+                )
+
+        MeshDiagnostics
+            .recordPacketSent()
+
         transport.broadcast(
-            packet
+            packetId =
+                envelope.packetId,
+            encodedPacket =
+                encoded
         )
     }
 
     private fun handleIncomingBytes(
+        sourceAddress: String,
         bytes: ByteArray
     ) {
 
-        val packet =
-            MeshPacketCodec.decode(
-                bytes
-            )
+        val envelope =
+            MeshPacketCodec
+                .decodeEnvelope(
+                    bytes
+                )
                 ?: return
 
+        /*
+         * A directly received packet has
+         * envelope.hops == 0, therefore
+         * the actual path distance to us
+         * is hops + 1.
+         */
+        val pathHops =
+            envelope.hops + 1
+
+        MeshDiagnostics
+            .recordPacketReceived(
+                pathHops
+            )
+
         if (
-            !markSeen(packet)
+            !markSeen(
+                envelope
+            )
         ) {
+
+            MeshDiagnostics
+                .recordDuplicateDropped()
+
             return
         }
 
         if (
-            packet.originId !=
-            nodeId &&
-            packet.channel ==
-            channelProvider()
+            envelope.originId ==
+            nodeId
         ) {
-            handleLocalDelivery(
-                packet
-            )
+            return
         }
 
+        val crypto =
+            roomCrypto
+
         if (
-            packet.ttl > 0
+            crypto != null &&
+            envelope.channel ==
+                currentChannel &&
+            crypto.matchesRoomTag(
+                envelope.roomTag
+            )
         ) {
 
-            transport.broadcast(
-                packet.copy(
-                    ttl =
-                        packet.ttl - 1
+            val packet =
+                MeshPacketCodec.open(
+                    envelope =
+                        envelope,
+                    crypto =
+                        crypto
                 )
+
+            if (
+                packet == null
+            ) {
+
+                MeshDiagnostics
+                    .recordDecryptFailure()
+
+            } else {
+
+                handleLocalPacket(
+                    sourceAddress =
+                        sourceAddress,
+                    envelope =
+                        envelope,
+                    packet =
+                        packet
+                )
+            }
+        }
+
+        val relayed =
+            MeshPacketCodec.relay(
+                envelope
+            )
+
+        if (
+            relayed != null
+        ) {
+
+            MeshDiagnostics
+                .recordPacketRelayed()
+
+            transport.broadcast(
+                packetId =
+                    relayed.packetId,
+
+                encodedPacket =
+                    MeshPacketCodec
+                        .encodeEnvelope(
+                            relayed
+                        ),
+
+                excludeAddress =
+                    sourceAddress
             )
         }
     }
 
-    private fun handleLocalDelivery(
+    private fun handleLocalPacket(
+        sourceAddress: String,
+        envelope: MeshEnvelope,
         packet: MeshPacket
     ) {
+
+        val pathHops =
+            envelope.hops + 1
 
         when (
             packet.type
         ) {
 
-            MeshPacketType.VOICE_START -> {
+            MeshPacketType
+                .NODE_ANNOUNCE -> {
 
                 val callsign =
-                    packet.payload
-                        .toString(
-                            Charsets.UTF_8
+                    decodeCallsign(
+                        packet.payload
+                    )
+
+                MeshDiagnostics
+                    .updateTopologyNode(
+                        nodeId =
+                            packet.originId,
+                        callsign =
+                            callsign,
+                        hops =
+                            pathHops
+                    )
+
+                if (
+                    envelope.hops ==
+                    0
+                ) {
+
+                    transport
+                        .updatePeerIdentity(
+                            address =
+                                sourceAddress,
+                            nodeId =
+                                packet.originId,
+                            callsign =
+                                callsign
                         )
-                        .trim()
-                        .take(20)
-                        .ifBlank {
-                            "Unknown"
-                        }
+                }
+            }
+
+            MeshPacketType
+                .VOICE_START -> {
+
+                val callsign =
+                    decodeCallsign(
+                        packet.payload
+                    )
 
                 sessionCallsigns[
                     packet.sessionId
                 ] =
                     callsign
 
-                lastSequences[
-                    packet.sessionId
-                ] =
-                    packet.sequence
+                MeshDiagnostics
+                    .updateTopologyNode(
+                        nodeId =
+                            packet.originId,
+                        callsign =
+                            callsign,
+                        hops =
+                            pathHops
+                    )
 
-                onIncomingStarted(
+                if (
+                    envelope.hops ==
+                    0
+                ) {
+
+                    transport
+                        .updatePeerIdentity(
+                            address =
+                                sourceAddress,
+                            nodeId =
+                                packet.originId,
+                            callsign =
+                                callsign
+                        )
+                }
+
+                onVoiceStart(
+                    packet.sessionId,
                     callsign
                 )
             }
 
-            MeshPacketType.VOICE_DATA -> {
-
-                val previous =
-                    lastSequences[
-                        packet.sessionId
-                    ]
-
-                if (
-                    previous != null &&
-                    packet.sequence <=
-                    previous
-                ) {
-                    return
-                }
-
-                lastSequences[
-                    packet.sessionId
-                ] =
-                    packet.sequence
+            MeshPacketType
+                .VOICE_DATA -> {
 
                 val callsign =
                     sessionCallsigns[
@@ -363,41 +707,74 @@ class MeshEngine(
                 if (
                     callsign != null
                 ) {
-                    onIncomingStarted(
-                        callsign
-                    )
+
+                    MeshDiagnostics
+                        .updateTopologyNode(
+                            nodeId =
+                                packet.originId,
+                            callsign =
+                                callsign,
+                            hops =
+                                pathHops
+                        )
                 }
 
+                /*
+                 * Do NOT discard packets
+                 * because sequence numbers
+                 * are out of order here.
+                 *
+                 * The jitter buffer handles
+                 * reordering later.
+                 */
                 onVoiceFrame(
+                    packet.sessionId,
+                    packet.sequence,
                     packet.payload
                 )
             }
 
-            MeshPacketType.VOICE_END -> {
+            MeshPacketType
+                .VOICE_END -> {
 
                 sessionCallsigns.remove(
                     packet.sessionId
                 )
 
-                lastSequences.remove(
-                    packet.sessionId
+                onVoiceEnd(
+                    packet.sessionId,
+                    packet.sequence
                 )
-
-                onIncomingEnded()
             }
         }
     }
 
+    private fun decodeCallsign(
+        payload: ByteArray
+    ): String {
+
+        return payload
+            .toString(
+                Charsets.UTF_8
+            )
+            .trim()
+            .take(20)
+            .ifBlank {
+                "Unknown"
+            }
+    }
+
     private fun markSeen(
-        packet: MeshPacket
+        envelope: MeshEnvelope
     ): Boolean {
 
         val key =
             SeenKey(
                 originId =
-                    packet.originId,
+                    envelope.originId,
+
                 packetId =
-                    packet.packetId
+                    envelope.packetId
             )
 
         synchronized(
@@ -405,9 +782,10 @@ class MeshEngine(
         ) {
 
             if (
-                seenPackets.containsKey(
-                    key
-                )
+                seenPackets
+                    .containsKey(
+                        key
+                    )
             ) {
                 return false
             }
@@ -441,16 +819,17 @@ class MeshEngine(
     companion object {
 
         /*
-         * Local device -> neighbor = hop 1.
-         *
-         * MAX_HOPS 4 allows several
-         * relays while still keeping
-         * runaway traffic controlled.
+         * Allows several relay stages,
+         * while keeping packet flooding
+         * bounded.
          */
-        private const val MAX_HOPS =
+        private const val INITIAL_TTL =
             4
 
         private const val SEEN_PACKET_LIMIT =
-            4096
+            8192
+
+        private const val ANNOUNCE_INTERVAL_MS =
+            15_000L
     }
 }
