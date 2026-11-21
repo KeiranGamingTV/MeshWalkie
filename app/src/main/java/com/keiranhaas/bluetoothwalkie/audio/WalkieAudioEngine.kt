@@ -276,7 +276,8 @@ class WalkieAudioEngine(
     }
 
     fun beginRemoteSession(
-        sessionId: Long
+        sessionId: Long,
+        firstSequence: Int = 1
     ) {
 
         synchronized(
@@ -298,7 +299,10 @@ class WalkieAudioEngine(
                     sessionId =
                         sessionId,
                     firstSequence =
-                        1
+                        firstSequence
+                            .coerceAtLeast(
+                                1
+                            )
                 )
         }
     }
