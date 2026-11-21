@@ -46,10 +46,17 @@ data class MeshEnvelope(
     val packetId: Long,
     val roomTag: ByteArray,
     val nonce: ByteArray,
-    val ciphertext: ByteArray
-)
+    val ciphertext: ByteArray,
+    val flags: Int = 0
+) {
+    val isControl: Boolean
+        get() = (flags and MeshPacketCodec.FLAG_CONTROL) != 0
+}
 
 object MeshPacketCodec {
+
+    /** Header flag: start/end/announce packets. Not authenticated; priority hint only. */
+    const val FLAG_CONTROL = 0x01
 
     private const val MAGIC =
         0x4D57
@@ -72,7 +79,8 @@ object MeshPacketCodec {
     fun seal(
         packet: MeshPacket,
         crypto: RoomCrypto,
-        initialTtl: Int
+        initialTtl: Int,
+        flags: Int = 0
     ): MeshEnvelope {
 
         require(
@@ -117,7 +125,8 @@ object MeshPacketCodec {
                         RoomCrypto.NONCE_SIZE
                     ),
                 ciphertext =
-                    ByteArray(0)
+                    ByteArray(0),
+                flags = flags
             )
 
         val aad =
@@ -268,7 +277,7 @@ object MeshPacketCodec {
         )
 
         buffer.put(
-            0.toByte()
+            envelope.flags.toByte()
         )
 
         buffer.putLong(
@@ -363,7 +372,10 @@ object MeshPacketCodec {
                     .toInt() and
                     0xFF
 
-            buffer.get()
+            val flags =
+                buffer.get()
+                    .toInt() and
+                    0xFF
 
             if (
                 initialTtl !in
@@ -449,7 +461,8 @@ object MeshPacketCodec {
                 nonce =
                     nonce,
                 ciphertext =
-                    ciphertext
+                    ciphertext,
+                flags = flags
             )
 
         } catch (_: Exception) {
