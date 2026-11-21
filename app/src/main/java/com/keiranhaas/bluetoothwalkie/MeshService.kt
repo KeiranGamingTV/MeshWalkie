@@ -11,12 +11,16 @@ import android.os.IBinder
 import com.keiranhaas.bluetoothwalkie.audio.WalkieAudioEngine
 import com.keiranhaas.bluetoothwalkie.mesh.MeshEngine
 import com.keiranhaas.bluetoothwalkie.prefs.AppPreferences
+import com.keiranhaas.bluetoothwalkie.prefs.RoomCodeStore
 
 class MeshService :
     Service() {
 
     private lateinit var preferences:
         AppPreferences
+
+    private lateinit var roomCodeStore:
+        RoomCodeStore
 
     private lateinit var audioEngine:
         WalkieAudioEngine
@@ -30,19 +34,35 @@ class MeshService :
     private var transmitting =
         false
 
+    private var receivingSessionId:
+        Long? =
+        null
+
     override fun onCreate() {
         super.onCreate()
 
         createNotificationChannel()
 
         preferences =
-            AppPreferences(this)
+            AppPreferences(
+                this
+            )
+
+        roomCodeStore =
+            RoomCodeStore(
+                this
+            )
 
         MeshRuntime.setConfig(
             callsign =
                 preferences.callsign,
+
             channel =
-                preferences.channel
+                preferences.channel,
+
+            roomCodeConfigured =
+                roomCodeStore
+                    .hasRoomCode()
         )
 
         audioEngine =
@@ -52,46 +72,111 @@ class MeshService :
 
         meshEngine =
             MeshEngine(
-                context = this,
+                context =
+                    this,
+
                 nodeId =
                     preferences.nodeId,
-                channelProvider = {
-                    preferences.channel
+
+                onVoiceStart = {
+                    sessionId,
+                    callsign ->
+
+                    if (
+                        !transmitting
+                    ) {
+
+                        receivingSessionId =
+                            sessionId
+
+                        MeshRuntime
+                            .setReceivingFrom(
+                                callsign
+                            )
+
+                        audioEngine
+                            .beginRemoteSession(
+                                sessionId
+                            )
+                    }
                 },
-                callsignProvider = {
-                    preferences.callsign
-                },
+
                 onVoiceFrame = {
-                    audioEngine
-                        .playCompressedFrame(
-                            it
-                        )
+                    sessionId,
+                    sequence,
+                    frame ->
+
+                    if (
+                        !transmitting
+                    ) {
+
+                        audioEngine
+                            .queueRemoteFrame(
+                                sessionId =
+                                    sessionId,
+
+                                sequence =
+                                    sequence,
+
+                                encoded =
+                                    frame
+                            )
+                    }
                 },
-                onIncomingStarted = {
-                    MeshRuntime
-                        .setReceivingFrom(
-                            it
-                        )
-                },
-                onIncomingEnded = {
-                    MeshRuntime
-                        .setReceivingFrom(
+
+                onVoiceEnd = {
+                    sessionId,
+                    endSequence ->
+
+                    if (
+                        !transmitting
+                    ) {
+
+                        audioEngine
+                            .endRemoteSession(
+                                sessionId =
+                                    sessionId,
+
+                                endSequence =
+                                    endSequence
+                            )
+                    }
+
+                    if (
+                        receivingSessionId ==
+                        sessionId
+                    ) {
+
+                        receivingSessionId =
                             null
-                        )
+
+                        MeshRuntime
+                            .setReceivingFrom(
+                                null
+                            )
+                    }
                 },
+
                 onPeerCountChanged = {
+                    count ->
+
                     MeshRuntime
                         .setPeerCount(
-                            it
+                            count
                         )
                 },
+
                 onStatus = {
+                    status ->
+
                     MeshRuntime
                         .setStatus(
-                            it
+                            status
                         )
                 }
             )
+
+        updateMeshConfiguration()
 
         MeshRuntime
             .setBluetoothSupported(
@@ -116,6 +201,13 @@ class MeshService :
             }
 
             ACTION_PTT_DOWN -> {
+
+                if (
+                    !networkStarted
+                ) {
+                    startMesh()
+                }
+
                 startTransmission()
             }
 
@@ -131,12 +223,20 @@ class MeshService :
                     stopTransmission()
                 }
 
-                MeshRuntime.setConfig(
-                    callsign =
-                        preferences.callsign,
-                    channel =
-                        preferences.channel
-                )
+                updateMeshConfiguration()
+
+                if (
+                    networkStarted
+                ) {
+
+                    meshEngine
+                        .sendAnnouncement()
+
+                    MeshRuntime
+                        .setStatus(
+                            "Encrypted room updated"
+                        )
+                }
             }
 
             ACTION_STOP -> {
@@ -159,7 +259,36 @@ class MeshService :
 
     override fun onBind(
         intent: Intent?
-    ): IBinder? = null
+    ): IBinder? =
+        null
+
+    private fun updateMeshConfiguration() {
+
+        val roomCode =
+            roomCodeStore.load()
+
+        meshEngine.updateConfig(
+            callsign =
+                preferences.callsign,
+
+            channel =
+                preferences.channel,
+
+            roomCode =
+                roomCode
+        )
+
+        MeshRuntime.setConfig(
+            callsign =
+                preferences.callsign,
+
+            channel =
+                preferences.channel,
+
+            roomCodeConfigured =
+                roomCode.isNotBlank()
+        )
+    }
 
     private fun startMesh() {
 
@@ -169,11 +298,25 @@ class MeshService :
             return
         }
 
-        /*
-         * Start with connectedDevice
-         * only. The microphone type is
-         * enabled only while PTT is held.
-         */
+        updateMeshConfiguration()
+
+        if (
+            !meshEngine
+                .hasEncryptionKey()
+        ) {
+
+            MeshRuntime
+                .setRunning(
+                    running =
+                        false,
+
+                    status =
+                        "Set a room code before starting the mesh"
+                )
+
+            return
+        }
+
         updateForeground(
             microphoneActive =
                 false
@@ -183,21 +326,26 @@ class MeshService :
             try {
                 meshEngine.start()
             } catch (
-                exception: SecurityException
+                _: SecurityException
             ) {
                 false
             }
 
-        if (!started) {
+        if (
+            !started
+        ) {
 
             networkStarted =
                 false
 
-            MeshRuntime.setRunning(
-                running = false,
-                status =
-                    "Unable to start Bluetooth mesh"
-            )
+            MeshRuntime
+                .setRunning(
+                    running =
+                        false,
+
+                    status =
+                        "Unable to start encrypted Bluetooth mesh"
+                )
 
             return
         }
@@ -205,11 +353,14 @@ class MeshService :
         networkStarted =
             true
 
-        MeshRuntime.setRunning(
-            running = true,
-            status =
-                "Mesh online — searching for peers"
-        )
+        MeshRuntime
+            .setRunning(
+                running =
+                    true,
+
+                status =
+                    "Encrypted mesh online — searching for peers"
+            )
     }
 
     private fun stopMesh() {
@@ -228,15 +379,24 @@ class MeshService :
         networkStarted =
             false
 
-        MeshRuntime.setPeerCount(
-            0
-        )
+        MeshRuntime
+            .setPeerCount(
+                0
+            )
 
-        MeshRuntime.setRunning(
-            running = false,
-            status =
-                "Mesh stopped"
-        )
+        MeshRuntime
+            .setReceivingFrom(
+                null
+            )
+
+        MeshRuntime
+            .setRunning(
+                running =
+                    false,
+
+                status =
+                    "Mesh stopped"
+            )
     }
 
     private fun startTransmission() {
@@ -248,11 +408,17 @@ class MeshService :
             return
         }
 
-        /*
-         * Android requires the
-         * microphone FGS type before
-         * the service accesses the mic.
-         */
+        audioEngine
+            .clearRemoteReception()
+
+        receivingSessionId =
+            null
+
+        MeshRuntime
+            .setReceivingFrom(
+                null
+            )
+
         updateForeground(
             microphoneActive =
                 true
@@ -272,7 +438,9 @@ class MeshService :
                         )
                 }
 
-        if (!started) {
+        if (
+            !started
+        ) {
 
             meshEngine
                 .endTalking()
@@ -282,9 +450,10 @@ class MeshService :
                     false
             )
 
-            MeshRuntime.setStatus(
-                "Unable to open microphone"
-            )
+            MeshRuntime
+                .setStatus(
+                    "Unable to open microphone"
+                )
 
             return
         }
@@ -297,9 +466,10 @@ class MeshService :
                 true
             )
 
-        MeshRuntime.setStatus(
-            "Transmitting on channel ${preferences.channel}"
-        )
+        MeshRuntime
+            .setStatus(
+                "Encrypted transmission on channel ${preferences.channel}"
+            )
     }
 
     private fun stopTransmission() {
@@ -329,15 +499,16 @@ class MeshService :
                 false
         )
 
-        MeshRuntime.setStatus(
-            if (
-                networkStarted
-            ) {
-                "Listening on channel ${preferences.channel}"
-            } else {
-                "Mesh stopped"
-            }
-        )
+        MeshRuntime
+            .setStatus(
+                if (
+                    networkStarted
+                ) {
+                    "Listening on encrypted channel ${preferences.channel}"
+                } else {
+                    "Mesh stopped"
+                }
+            )
     }
 
     private fun updateForeground(
@@ -356,6 +527,7 @@ class MeshService :
         if (
             microphoneActive
         ) {
+
             foregroundTypes =
                 foregroundTypes or
                     ServiceInfo
@@ -380,27 +552,35 @@ class MeshService :
             )
 
         val pendingIntent =
-            PendingIntent.getActivity(
-                this,
-                0,
-                activityIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or
-                    PendingIntent.FLAG_IMMUTABLE
-            )
+            PendingIntent
+                .getActivity(
+                    this,
+                    0,
+                    activityIntent,
+
+                    PendingIntent
+                        .FLAG_UPDATE_CURRENT or
+                        PendingIntent
+                            .FLAG_IMMUTABLE
+                )
 
         val text =
             if (
                 microphoneActive
             ) {
-                "Transmitting on channel ${preferences.channel}"
+
+                "Encrypted transmission • Channel ${preferences.channel}"
+
             } else {
-                "Mesh active • ${MeshRuntime.state.value.peerCount} peer(s)"
+
+                "Encrypted mesh active • ${MeshRuntime.state.value.peerCount} peer(s)"
             }
 
-        return Notification.Builder(
-            this,
-            NOTIFICATION_CHANNEL_ID
-        )
+        return Notification
+            .Builder(
+                this,
+                NOTIFICATION_CHANNEL_ID
+            )
             .setSmallIcon(
                 R.drawable.ic_mesh
             )
@@ -413,8 +593,12 @@ class MeshService :
             .setContentIntent(
                 pendingIntent
             )
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
+            .setOngoing(
+                true
+            )
+            .setOnlyAlertOnce(
+                true
+            )
             .build()
     }
 
@@ -429,15 +613,18 @@ class MeshService :
             NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "Mesh network",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager
+                    .IMPORTANCE_LOW
             ).apply {
+
                 description =
-                    "Shows when the MeshWalkie Bluetooth network is active."
+                    "Shows when the encrypted MeshWalkie network is active."
             }
 
-        manager.createNotificationChannel(
-            channel
-        )
+        manager
+            .createNotificationChannel(
+                channel
+            )
     }
 
     override fun onDestroy() {
@@ -452,23 +639,29 @@ class MeshService :
         } catch (_: Exception) {
         }
 
-        MeshRuntime.setPeerCount(
-            0
-        )
+        MeshRuntime
+            .setPeerCount(
+                0
+            )
 
-        MeshRuntime.setTransmitting(
-            false
-        )
+        MeshRuntime
+            .setTransmitting(
+                false
+            )
 
-        MeshRuntime.setReceivingFrom(
-            null
-        )
+        MeshRuntime
+            .setReceivingFrom(
+                null
+            )
 
-        MeshRuntime.setRunning(
-            running = false,
-            status =
-                "Mesh stopped"
-        )
+        MeshRuntime
+            .setRunning(
+                running =
+                    false,
+
+                status =
+                    "Mesh stopped"
+            )
 
         super.onDestroy()
     }
