@@ -15,6 +15,11 @@ import com.keiranhaas.bluetoothwalkie.prefs.RoomCodeStore
 import android.os.Handler
 import android.os.Looper
 import com.keiranhaas.bluetoothwalkie.mesh.TalkRequestResult
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 
 class MeshService :
     Service() {
@@ -33,6 +38,65 @@ class MeshService :
 
     private var networkStarted =
         false
+
+    private var resumeAfterBluetooth =
+        false
+
+    private val bluetoothReceiver =
+        object :
+            BroadcastReceiver() {
+
+            override fun onReceive(
+                context: Context?,
+                intent: Intent?
+            ) {
+
+                when (
+                    intent?.getIntExtra(
+                        BluetoothAdapter.EXTRA_STATE,
+                        BluetoothAdapter.ERROR
+                    )
+                ) {
+
+                    BluetoothAdapter.STATE_TURNING_OFF,
+                    BluetoothAdapter.STATE_OFF -> {
+
+                        if (
+                            networkStarted
+                        ) {
+
+                            resumeAfterBluetooth =
+                                true
+
+                            stopTransmission()
+                            stopMesh()
+
+                            MeshRuntime.setStatus(
+                                "Bluetooth is off — mesh paused"
+                            )
+                        }
+                    }
+
+                    BluetoothAdapter.STATE_ON -> {
+
+                        if (
+                            resumeAfterBluetooth
+                        ) {
+
+                            resumeAfterBluetooth =
+                                false
+
+                            mainHandler.postDelayed(
+                                {
+                                    startMesh()
+                                },
+                                1_000L
+                            )
+                        }
+                    }
+                }
+            }
+        }
 
     @Volatile
     private var transmitting =
@@ -209,6 +273,17 @@ class MeshService :
                 meshEngine
                     .isBluetoothAvailable()
             )
+
+        ContextCompat.registerReceiver(
+            this,
+            bluetoothReceiver,
+            IntentFilter(
+                BluetoothAdapter
+                    .ACTION_STATE_CHANGED
+            ),
+            ContextCompat
+                .RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onStartCommand(
@@ -266,6 +341,9 @@ class MeshService :
             }
 
             ACTION_STOP -> {
+
+                resumeAfterBluetooth =
+                    false
 
                 stopTransmission()
                 stopMesh()
@@ -679,6 +757,12 @@ class MeshService :
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(
+                bluetoothReceiver
+            )
+        } catch (_: Exception) {
+        }
 
         mainHandler.removeCallbacks(
             transmitTimeout
