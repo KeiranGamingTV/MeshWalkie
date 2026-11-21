@@ -24,13 +24,14 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.ParcelUuid
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -38,15 +39,15 @@ import java.util.concurrent.ConcurrentHashMap
 @SuppressLint("MissingPermission")
 class BleMeshTransport(
     context: Context,
-    private val onPacketReceived: (
-        ByteArray
-    ) -> Unit,
-    private val onPeerCountChanged: (
-        Int
-    ) -> Unit,
-    private val onStatus: (
-        String
-    ) -> Unit
+    private val onPacketReceived:
+        (
+            sourceAddress: String,
+            packet: ByteArray
+        ) -> Unit,
+    private val onPeerCountChanged:
+        (Int) -> Unit,
+    private val onStatus:
+        (String) -> Unit
 ) {
 
     private val appContext =
@@ -78,38 +79,86 @@ class BleMeshTransport(
         >()
 
     private val connecting =
-        ConcurrentHashMap.newKeySet<String>()
+        ConcurrentHashMap
+            .newKeySet<String>()
+
+    private val knownDevices =
+        ConcurrentHashMap<
+            String,
+            BluetoothDevice
+        >()
+
+    private val scanRssi =
+        ConcurrentHashMap<
+            String,
+            Int
+        >()
+
+    private val reconnectJobs =
+        ConcurrentHashMap<
+            String,
+            Job
+        >()
+
+    private val reconnectBackoff =
+        ConcurrentHashMap<
+            String,
+            Int
+        >()
+
+    private val nextConnectAllowed =
+        ConcurrentHashMap<
+            String,
+            Long
+        >()
 
     private var gattServer:
-        BluetoothGattServer? = null
+        BluetoothGattServer? =
+        null
 
     private var scanner:
-        BluetoothLeScanner? = null
+        BluetoothLeScanner? =
+        null
 
     private var advertiser:
-        BluetoothLeAdvertiser? = null
+        BluetoothLeAdvertiser? =
+        null
+
+    private var rssiJob:
+        Job? =
+        null
 
     @Volatile
     private var started =
         false
 
-    val isBluetoothAvailable: Boolean
+    val isBluetoothAvailable:
+        Boolean
         get() {
+
             val localAdapter =
                 adapter
                     ?: return false
 
-            if (!localAdapter.isEnabled) {
+            if (
+                !localAdapter.isEnabled
+            ) {
                 return false
             }
 
-            return localAdapter.bluetoothLeScanner != null &&
-                localAdapter.bluetoothLeAdvertiser != null
+            return (
+                localAdapter.bluetoothLeScanner
+                    != null &&
+                localAdapter.bluetoothLeAdvertiser
+                    != null
+                )
         }
 
     fun start(): Boolean {
 
-        if (started) {
+        if (
+            started
+        ) {
             return true
         }
 
@@ -128,10 +177,12 @@ class BleMeshTransport(
         }
 
         scanner =
-            localAdapter.bluetoothLeScanner
+            localAdapter
+                .bluetoothLeScanner
 
         advertiser =
-            localAdapter.bluetoothLeAdvertiser
+            localAdapter
+                .bluetoothLeAdvertiser
 
         if (
             scanner == null ||
@@ -145,12 +196,15 @@ class BleMeshTransport(
         }
 
         val server =
-            bluetoothManager.openGattServer(
-                appContext,
-                serverCallback
-            )
+            bluetoothManager
+                .openGattServer(
+                    appContext,
+                    serverCallback
+                )
 
-        if (server == null) {
+        if (
+            server == null
+        ) {
             onStatus(
                 "Unable to open Bluetooth GATT server"
             )
@@ -158,47 +212,56 @@ class BleMeshTransport(
             return false
         }
 
-        gattServer = server
+        gattServer =
+            server
 
         val service =
             BluetoothGattService(
                 SERVICE_UUID,
-                BluetoothGattService.SERVICE_TYPE_PRIMARY
+                BluetoothGattService
+                    .SERVICE_TYPE_PRIMARY
             )
 
         val receiveCharacteristic =
             BluetoothGattCharacteristic(
                 RX_CHARACTERISTIC_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE or
-                    BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
-                BluetoothGattCharacteristic.PERMISSION_WRITE
+
+                BluetoothGattCharacteristic
+                    .PROPERTY_WRITE or
+                    BluetoothGattCharacteristic
+                        .PROPERTY_WRITE_NO_RESPONSE,
+
+                BluetoothGattCharacteristic
+                    .PERMISSION_WRITE
             )
 
         service.addCharacteristic(
             receiveCharacteristic
         )
 
-        val serviceAdded =
-            server.addService(
+        if (
+            !server.addService(
                 service
             )
+        ) {
 
-        if (!serviceAdded) {
+            server.close()
+
+            gattServer =
+                null
 
             onStatus(
                 "Unable to register MeshWalkie GATT service"
             )
 
-            server.close()
-
-            gattServer = null
-
             return false
         }
 
-        started = true
+        started =
+            true
 
         startScanning()
+        startRssiMonitor()
 
         onStatus(
             "Starting Bluetooth mesh"
@@ -209,11 +272,27 @@ class BleMeshTransport(
 
     fun stop() {
 
-        if (!started) {
+        if (
+            !started
+        ) {
             return
         }
 
-        started = false
+        started =
+            false
+
+        rssiJob?.cancel()
+        rssiJob = null
+
+        reconnectJobs
+            .values
+            .forEach {
+                it.cancel()
+            }
+
+        reconnectJobs.clear()
+        reconnectBackoff.clear()
+        nextConnectAllowed.clear()
 
         try {
             scanner?.stopScan(
@@ -223,9 +302,10 @@ class BleMeshTransport(
         }
 
         try {
-            advertiser?.stopAdvertising(
-                advertiseCallback
-            )
+            advertiser
+                ?.stopAdvertising(
+                    advertiseCallback
+                )
         } catch (_: Exception) {
         }
 
@@ -233,22 +313,40 @@ class BleMeshTransport(
             .values
             .toList()
             .forEach {
-                closePeer(it)
+                peer ->
+
+                MeshDiagnostics
+                    .markPeerDisconnected(
+                        peer.address
+                    )
+
+                closePeer(
+                    peer,
+                    disconnect =
+                        true
+                )
             }
 
         peers.clear()
-
         connecting.clear()
+        knownDevices.clear()
+        scanRssi.clear()
 
         try {
-            gattServer?.clearServices()
-            gattServer?.close()
+            gattServer
+                ?.clearServices()
+
+            gattServer
+                ?.close()
         } catch (_: Exception) {
         }
 
-        gattServer = null
+        gattServer =
+            null
 
-        onPeerCountChanged(0)
+        onPeerCountChanged(
+            0
+        )
 
         onStatus(
             "Bluetooth mesh stopped"
@@ -258,25 +356,34 @@ class BleMeshTransport(
     }
 
     fun broadcast(
-        packet: MeshPacket
+        packetId: Long,
+        encodedPacket: ByteArray,
+        excludeAddress: String? = null
     ) {
 
-        if (!started) {
+        if (
+            !started
+        ) {
             return
         }
-
-        val encoded =
-            MeshPacketCodec.encode(
-                packet
-            )
 
         for (
             peer in
             peers.values
         ) {
 
+            if (
+                peer.address ==
+                excludeAddress
+            ) {
+                continue
+            }
+
             val maximumWrite =
-                (peer.mtu - ATT_OVERHEAD_BYTES)
+                (
+                    peer.mtu -
+                        ATT_OVERHEAD_BYTES
+                    )
                     .coerceAtLeast(
                         MINIMUM_WRITE_SIZE
                     )
@@ -284,9 +391,9 @@ class BleMeshTransport(
             val fragments =
                 FragmentCodec.fragment(
                     fragmentId =
-                        packet.packetId,
+                        packetId,
                     packet =
-                        encoded,
+                        encodedPacket,
                     maxWriteSize =
                         maximumWrite
                 )
@@ -295,12 +402,41 @@ class BleMeshTransport(
                 fragment in
                 fragments
             ) {
+
                 peer.sendQueue
                     .trySend(
                         fragment
                     )
             }
         }
+    }
+
+    fun updatePeerIdentity(
+        address: String,
+        nodeId: Long,
+        callsign: String
+    ) {
+
+        peers[address]
+            ?.let {
+                peer ->
+
+                peer.nodeId =
+                    nodeId
+
+                peer.callsign =
+                    callsign
+            }
+
+        MeshDiagnostics
+            .setPeerIdentity(
+                address =
+                    address,
+                nodeId =
+                    nodeId,
+                callsign =
+                    callsign
+            )
     }
 
     private fun startScanning() {
@@ -310,7 +446,8 @@ class BleMeshTransport(
                 ?: return
 
         val filter =
-            ScanFilter.Builder()
+            ScanFilter
+                .Builder()
                 .setServiceUuid(
                     ParcelUuid(
                         SERVICE_UUID
@@ -319,21 +456,28 @@ class BleMeshTransport(
                 .build()
 
         val settings =
-            ScanSettings.Builder()
+            ScanSettings
+                .Builder()
                 .setScanMode(
-                    ScanSettings.SCAN_MODE_LOW_LATENCY
+                    ScanSettings
+                        .SCAN_MODE_LOW_LATENCY
                 )
                 .build()
 
         try {
+
             localScanner.startScan(
-                listOf(filter),
+                listOf(
+                    filter
+                ),
                 settings,
                 scanCallback
             )
+
         } catch (
             exception: Exception
         ) {
+
             onStatus(
                 "BLE scan failed: ${exception.message}"
             )
@@ -347,21 +491,33 @@ class BleMeshTransport(
                 ?: return
 
         val settings =
-            AdvertiseSettings.Builder()
+            AdvertiseSettings
+                .Builder()
                 .setAdvertiseMode(
-                    AdvertiseSettings.ADVERTISE_MODE_BALANCED
+                    AdvertiseSettings
+                        .ADVERTISE_MODE_BALANCED
                 )
-                .setConnectable(true)
-                .setTimeout(0)
+                .setConnectable(
+                    true
+                )
+                .setTimeout(
+                    0
+                )
                 .setTxPowerLevel(
-                    AdvertiseSettings.ADVERTISE_TX_POWER_HIGH
+                    AdvertiseSettings
+                        .ADVERTISE_TX_POWER_HIGH
                 )
                 .build()
 
         val data =
-            AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .setIncludeTxPowerLevel(false)
+            AdvertiseData
+                .Builder()
+                .setIncludeDeviceName(
+                    false
+                )
+                .setIncludeTxPowerLevel(
+                    false
+                )
                 .addServiceUuid(
                     ParcelUuid(
                         SERVICE_UUID
@@ -370,65 +526,149 @@ class BleMeshTransport(
                 .build()
 
         try {
-            localAdvertiser.startAdvertising(
-                settings,
-                data,
-                advertiseCallback
-            )
+
+            localAdvertiser
+                .startAdvertising(
+                    settings,
+                    data,
+                    advertiseCallback
+                )
+
         } catch (
             exception: Exception
         ) {
+
             onStatus(
                 "BLE advertising failed: ${exception.message}"
             )
         }
     }
 
+    private fun startRssiMonitor() {
+
+        rssiJob =
+            scope.launch {
+
+                while (
+                    isActive &&
+                    started
+                ) {
+
+                    for (
+                        peer in
+                        peers.values
+                    ) {
+
+                        try {
+                            peer.gatt
+                                .readRemoteRssi()
+                        } catch (_: Exception) {
+                        }
+
+                        delay(
+                            RSSI_REQUEST_SPACING_MS
+                        )
+                    }
+
+                    delay(
+                        RSSI_POLL_INTERVAL_MS
+                    )
+                }
+            }
+    }
+
     private fun connectToDevice(
-        device: BluetoothDevice
+        device: BluetoothDevice,
+        recoveryAttempt: Boolean = false
     ) {
 
-        if (!started) {
+        if (
+            !started
+        ) {
             return
         }
 
         val address =
             device.address
 
+        knownDevices[address] =
+            device
+
         if (
-            peers.containsKey(address) ||
-            connecting.contains(address)
+            peers.containsKey(
+                address
+            ) ||
+            connecting.contains(
+                address
+            )
         ) {
             return
         }
 
         if (
-            peers.size >= MAX_PEERS
+            peers.size >=
+            MAX_PEERS
         ) {
             return
         }
 
-        connecting.add(address)
+        val allowedAt =
+            nextConnectAllowed[
+                address
+            ] ?: 0L
+
+        if (
+            System.currentTimeMillis() <
+            allowedAt
+        ) {
+            return
+        }
+
+        connecting.add(
+            address
+        )
+
+        if (
+            recoveryAttempt
+        ) {
+            MeshDiagnostics
+                .markReconnectAttempt(
+                    address
+                )
+        }
 
         try {
 
-            device.connectGatt(
-                appContext,
-                false,
-                gattCallback,
-                BluetoothDevice.TRANSPORT_LE
-            )
+            val gatt =
+                device.connectGatt(
+                    appContext,
+                    false,
+                    gattCallback,
+                    BluetoothDevice
+                        .TRANSPORT_LE
+                )
 
-        } catch (
-            exception: Exception
-        ) {
+            if (
+                gatt == null
+            ) {
+
+                connecting.remove(
+                    address
+                )
+
+                scheduleReconnect(
+                    device
+                )
+            }
+
+        } catch (_: Exception) {
 
             connecting.remove(
                 address
             )
 
-            onStatus(
-                "Peer connection failed"
+            scheduleReconnect(
+                device
             )
         }
     }
@@ -443,17 +683,25 @@ class BleMeshTransport(
             gatt.device.address
 
         if (
-            peers.containsKey(address)
+            peers.containsKey(
+                address
+            )
         ) {
             return
         }
 
         val peer =
             PeerConnection(
-                address = address,
-                gatt = gatt,
+                address =
+                    address,
+                gatt =
+                    gatt,
                 characteristic =
-                    characteristic
+                    characteristic,
+                rssi =
+                    scanRssi[
+                        address
+                    ]
             )
 
         val existing =
@@ -462,9 +710,33 @@ class BleMeshTransport(
                 peer
             )
 
-        if (existing != null) {
+        if (
+            existing != null
+        ) {
             return
         }
+
+        reconnectBackoff[
+            address
+        ] = 0
+
+        nextConnectAllowed.remove(
+            address
+        )
+
+        reconnectJobs.remove(
+            address
+        )?.cancel()
+
+        MeshDiagnostics
+            .markPeerConnected(
+                address =
+                    address,
+                mtu =
+                    peer.mtu,
+                rssi =
+                    peer.rssi
+            )
 
         peer.senderJob =
             scope.launch {
@@ -474,25 +746,31 @@ class BleMeshTransport(
                     peer.sendQueue
                 ) {
 
-                    if (!started) {
+                    if (
+                        !started
+                    ) {
                         break
                     }
 
                     var sent =
                         false
 
-                    repeat(
-                        WRITE_RETRY_COUNT
+                    for (
+                        attempt in
+                        0 until
+                            WRITE_RETRY_COUNT
                     ) {
 
                         if (
                             writeCharacteristic(
-                                peer,
-                                frame
+                                peer =
+                                    peer,
+                                bytes =
+                                    frame
                             )
                         ) {
                             sent = true
-                            return@repeat
+                            break
                         }
 
                         delay(
@@ -500,15 +778,17 @@ class BleMeshTransport(
                         )
                     }
 
-                    if (!sent) {
-                        // Voice favors continuing
-                        // instead of blocking the
-                        // entire queue indefinitely.
+                    if (
+                        sent
+                    ) {
+                        delay(
+                            WRITE_SPACING_MS
+                        )
+                    } else {
+                        delay(
+                            WRITE_FAILURE_PAUSE_MS
+                        )
                     }
-
-                    delay(
-                        WRITE_SPACING_MS
-                    )
                 }
             }
 
@@ -521,19 +801,63 @@ class BleMeshTransport(
         )
     }
 
-    private fun removePeer(
-        address: String
+    private fun removeConnectedPeer(
+        gatt: BluetoothGatt,
+        reconnect: Boolean
     ) {
 
-        val peer =
-            peers.remove(address)
-                ?: return
+        val address =
+            gatt.device.address
 
-        closePeer(peer)
+        connecting.remove(
+            address
+        )
+
+        val peer =
+            peers.remove(
+                address
+            )
+
+        if (
+            peer != null
+        ) {
+            closePeer(
+                peer =
+                    peer,
+                disconnect =
+                    false
+            )
+        } else {
+            try {
+                gatt.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        MeshDiagnostics
+            .markPeerDisconnected(
+                address
+            )
 
         onPeerCountChanged(
             peers.size
         )
+
+        if (
+            reconnect &&
+            started
+        ) {
+
+            knownDevices[
+                address
+            ]?.let {
+                device ->
+
+                scheduleReconnect(
+                    device
+                )
+            }
+        }
 
         if (
             started &&
@@ -546,22 +870,123 @@ class BleMeshTransport(
     }
 
     private fun closePeer(
-        peer: PeerConnection
+        peer: PeerConnection,
+        disconnect: Boolean
     ) {
 
         peer.sendQueue.close()
 
-        peer.senderJob?.cancel()
+        peer.senderJob
+            ?.cancel()
 
-        try {
-            peer.gatt.disconnect()
-        } catch (_: Exception) {
+        if (
+            disconnect
+        ) {
+            try {
+                peer.gatt
+                    .disconnect()
+            } catch (_: Exception) {
+            }
         }
 
         try {
             peer.gatt.close()
         } catch (_: Exception) {
         }
+    }
+
+    private fun scheduleReconnect(
+        device: BluetoothDevice
+    ) {
+
+        if (
+            !started
+        ) {
+            return
+        }
+
+        val address =
+            device.address
+
+        if (
+            reconnectJobs[
+                address
+            ]?.isActive ==
+            true
+        ) {
+            return
+        }
+
+        val attempt =
+            (
+                reconnectBackoff[
+                    address
+                ] ?: 0
+                ) + 1
+
+        reconnectBackoff[
+            address
+        ] =
+            attempt
+
+        val exponent =
+            (attempt - 1)
+                .coerceAtMost(
+                    4
+                )
+
+        val delayMs =
+            (
+                1_000L *
+                    (1 shl exponent)
+                )
+                .coerceAtMost(
+                    MAX_RECONNECT_DELAY_MS
+                )
+
+        nextConnectAllowed[
+            address
+        ] =
+            System.currentTimeMillis() +
+                delayMs
+
+        val job =
+            scope.launch {
+
+                delay(
+                    delayMs
+                )
+
+                nextConnectAllowed
+                    .remove(
+                        address
+                    )
+
+                if (
+                    started &&
+                    !peers
+                        .containsKey(
+                            address
+                        )
+                ) {
+
+                    connectToDevice(
+                        device =
+                            device,
+                        recoveryAttempt =
+                            true
+                    )
+                }
+
+                reconnectJobs.remove(
+                    address
+                )
+            }
+
+        reconnectJobs[
+            address
+        ] =
+            job
     }
 
     private fun writeCharacteristic(
@@ -576,27 +1001,40 @@ class BleMeshTransport(
                 Build.VERSION_CODES.TIRAMISU
             ) {
 
-                peer.gatt.writeCharacteristic(
-                    peer.characteristic,
-                    bytes,
-                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                ) ==
-                    BluetoothStatusCodes.SUCCESS
+                peer.gatt
+                    .writeCharacteristic(
+                        peer.characteristic,
+                        bytes,
+                        BluetoothGattCharacteristic
+                            .WRITE_TYPE_NO_RESPONSE
+                    ) ==
+                    BluetoothStatusCodes
+                        .SUCCESS
 
             } else {
 
-                @Suppress("DEPRECATION")
-                peer.characteristic.writeType =
-                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                @Suppress(
+                    "DEPRECATION"
+                )
+                peer.characteristic
+                    .writeType =
+                    BluetoothGattCharacteristic
+                        .WRITE_TYPE_NO_RESPONSE
 
-                @Suppress("DEPRECATION")
-                peer.characteristic.value =
+                @Suppress(
+                    "DEPRECATION"
+                )
+                peer.characteristic
+                    .value =
                     bytes
 
-                @Suppress("DEPRECATION")
-                peer.gatt.writeCharacteristic(
-                    peer.characteristic
+                @Suppress(
+                    "DEPRECATION"
                 )
+                peer.gatt
+                    .writeCharacteristic(
+                        peer.characteristic
+                    )
             }
 
         } catch (_: Exception) {
@@ -634,6 +1072,36 @@ class BleMeshTransport(
                 callbackType: Int,
                 result: ScanResult
             ) {
+
+                val address =
+                    result.device.address
+
+                knownDevices[
+                    address
+                ] =
+                    result.device
+
+                scanRssi[
+                    address
+                ] =
+                    result.rssi
+
+                peers[address]
+                    ?.let {
+                        peer ->
+
+                        peer.rssi =
+                            result.rssi
+
+                        MeshDiagnostics
+                            .updatePeerLink(
+                                address =
+                                    address,
+                                rssi =
+                                    result.rssi
+                            )
+                    }
+
                 connectToDevice(
                     result.device
                 )
@@ -643,12 +1111,15 @@ class BleMeshTransport(
                 results:
                     MutableList<ScanResult>
             ) {
+
                 for (
                     result in
                     results
                 ) {
-                    connectToDevice(
-                        result.device
+                    onScanResult(
+                        ScanSettings
+                            .CALLBACK_TYPE_ALL_MATCHES,
+                        result
                     )
                 }
             }
@@ -674,13 +1145,40 @@ class BleMeshTransport(
 
                 if (
                     status ==
-                    BluetoothGatt.GATT_SUCCESS
+                    BluetoothGatt
+                        .GATT_SUCCESS
                 ) {
+
                     startAdvertising()
+
                 } else {
+
                     onStatus(
                         "GATT service registration failed"
                     )
+                }
+            }
+
+            override fun onMtuChanged(
+                device: BluetoothDevice,
+                mtu: Int
+            ) {
+
+                peers[
+                    device.address
+                ]?.let {
+                    peer ->
+
+                    peer.mtu =
+                        mtu
+
+                    MeshDiagnostics
+                        .updatePeerLink(
+                            address =
+                                device.address,
+                            mtu =
+                                mtu
+                        )
                 }
             }
 
@@ -707,13 +1205,17 @@ class BleMeshTransport(
                     offset != 0
                 ) {
 
-                    if (responseNeeded) {
+                    if (
+                        responseNeeded
+                    ) {
+
                         try {
                             gattServer
                                 ?.sendResponse(
                                     device,
                                     requestId,
-                                    BluetoothGatt.GATT_FAILURE,
+                                    BluetoothGatt
+                                        .GATT_FAILURE,
                                     0,
                                     null
                                 )
@@ -733,9 +1235,12 @@ class BleMeshTransport(
                     )
 
                 if (
-                    completePacket != null
+                    completePacket !=
+                    null
                 ) {
+
                     onPacketReceived(
+                        device.address,
                         completePacket
                     )
                 }
@@ -743,12 +1248,14 @@ class BleMeshTransport(
                 if (
                     responseNeeded
                 ) {
+
                     try {
                         gattServer
                             ?.sendResponse(
                                 device,
                                 requestId,
-                                BluetoothGatt.GATT_SUCCESS,
+                                BluetoothGatt
+                                    .GATT_SUCCESS,
                                 0,
                                 null
                             )
@@ -775,42 +1282,70 @@ class BleMeshTransport(
                     newState
                 ) {
 
-                    BluetoothProfile.STATE_CONNECTED -> {
+                    BluetoothProfile
+                        .STATE_CONNECTED -> {
 
                         connecting.remove(
                             address
                         )
 
-                        try {
-                            gatt.discoverServices()
-                        } catch (
-                            exception: Exception
+                        if (
+                            status !=
+                            BluetoothGatt
+                                .GATT_SUCCESS
                         ) {
-                            removePeer(
-                                address
-                            )
 
                             try {
                                 gatt.close()
                             } catch (_: Exception) {
                             }
+
+                            scheduleReconnect(
+                                gatt.device
+                            )
+
+                            return
+                        }
+
+                        try {
+
+                            if (
+                                !gatt
+                                    .discoverServices()
+                            ) {
+
+                                try {
+                                    gatt.close()
+                                } catch (_: Exception) {
+                                }
+
+                                scheduleReconnect(
+                                    gatt.device
+                                )
+                            }
+
+                        } catch (_: Exception) {
+
+                            try {
+                                gatt.close()
+                            } catch (_: Exception) {
+                            }
+
+                            scheduleReconnect(
+                                gatt.device
+                            )
                         }
                     }
 
-                    BluetoothProfile.STATE_DISCONNECTED -> {
+                    BluetoothProfile
+                        .STATE_DISCONNECTED -> {
 
-                        connecting.remove(
-                            address
+                        removeConnectedPeer(
+                            gatt =
+                                gatt,
+                            reconnect =
+                                true
                         )
-
-                        removePeer(
-                            address
-                        )
-
-                        try {
-                            gatt.close()
-                        } catch (_: Exception) {
-                        }
                     }
                 }
             }
@@ -822,8 +1357,16 @@ class BleMeshTransport(
 
                 if (
                     status !=
-                    BluetoothGatt.GATT_SUCCESS
+                    BluetoothGatt
+                        .GATT_SUCCESS
                 ) {
+
+                    removeConnectedPeer(
+                        gatt,
+                        reconnect =
+                            true
+                    )
+
                     return
                 }
 
@@ -831,22 +1374,38 @@ class BleMeshTransport(
                     gatt.getService(
                         SERVICE_UUID
                     )
-                        ?: return
 
                 val characteristic =
-                    service.getCharacteristic(
-                        RX_CHARACTERISTIC_UUID
+                    service
+                        ?.getCharacteristic(
+                            RX_CHARACTERISTIC_UUID
+                        )
+
+                if (
+                    characteristic ==
+                    null
+                ) {
+
+                    removeConnectedPeer(
+                        gatt,
+                        reconnect =
+                            true
                     )
-                        ?: return
+
+                    return
+                }
 
                 createPeer(
-                    gatt,
-                    characteristic
+                    gatt =
+                        gatt,
+                    characteristic =
+                        characteristic
                 )
 
                 try {
                     gatt.requestConnectionPriority(
-                        BluetoothGatt.CONNECTION_PRIORITY_HIGH
+                        BluetoothGatt
+                            .CONNECTION_PRIORITY_HIGH
                     )
                 } catch (_: Exception) {
                 }
@@ -867,17 +1426,72 @@ class BleMeshTransport(
 
                 if (
                     status !=
-                    BluetoothGatt.GATT_SUCCESS
+                    BluetoothGatt
+                        .GATT_SUCCESS
                 ) {
                     return
                 }
 
-                peers[
-                    gatt.device.address
-                ]?.mtu =
+                val peer =
+                    peers[
+                        gatt.device.address
+                    ]
+                        ?: return
+
+                peer.mtu =
                     mtu.coerceAtLeast(
                         DEFAULT_MTU
                     )
+
+                MeshDiagnostics
+                    .updatePeerLink(
+                        address =
+                            peer.address,
+                        mtu =
+                            peer.mtu
+                    )
+            }
+
+            override fun onReadRemoteRssi(
+                gatt: BluetoothGatt,
+                rssi: Int,
+                status: Int
+            ) {
+
+                if (
+                    status !=
+                    BluetoothGatt
+                        .GATT_SUCCESS
+                ) {
+                    return
+                }
+
+                val peer =
+                    peers[
+                        gatt.device.address
+                    ]
+                        ?: return
+
+                peer.rssi =
+                    rssi
+
+                MeshDiagnostics
+                    .updatePeerLink(
+                        address =
+                            peer.address,
+                        rssi =
+                            rssi
+                    )
+            }
+
+            override fun onServiceChanged(
+                gatt: BluetoothGatt
+            ) {
+
+                try {
+                    gatt.discoverServices()
+                } catch (_: Exception) {
+                }
             }
         }
 
@@ -885,12 +1499,25 @@ class BleMeshTransport(
         val address: String,
         val gatt: BluetoothGatt,
         val characteristic:
-            BluetoothGattCharacteristic
+            BluetoothGattCharacteristic,
+        rssi: Int?
     ) {
 
         @Volatile
         var mtu: Int =
             DEFAULT_MTU
+
+        @Volatile
+        var rssi: Int? =
+            rssi
+
+        @Volatile
+        var nodeId: Long? =
+            null
+
+        @Volatile
+        var callsign: String? =
+            null
 
         val sendQueue =
             Channel<ByteArray>(
@@ -899,7 +1526,8 @@ class BleMeshTransport(
             )
 
         var senderJob:
-            Job? = null
+            Job? =
+            null
     }
 
     companion object {
@@ -924,14 +1552,18 @@ class BleMeshTransport(
         private const val DEFAULT_MTU =
             23
 
+        /*
+         * ATT write-command overhead is
+         * three bytes.
+         */
         private const val ATT_OVERHEAD_BYTES =
-            5
+            3
 
         private const val MINIMUM_WRITE_SIZE =
-            18
+            20
 
         private const val SEND_QUEUE_SIZE =
-            512
+            1024
 
         private const val WRITE_SPACING_MS =
             3L
@@ -939,7 +1571,19 @@ class BleMeshTransport(
         private const val WRITE_RETRY_DELAY_MS =
             8L
 
+        private const val WRITE_FAILURE_PAUSE_MS =
+            15L
+
         private const val WRITE_RETRY_COUNT =
             3
+
+        private const val RSSI_POLL_INTERVAL_MS =
+            5_000L
+
+        private const val RSSI_REQUEST_SPACING_MS =
+            150L
+
+        private const val MAX_RECONNECT_DELAY_MS =
+            15_000L
     }
 }
