@@ -55,7 +55,11 @@ class MeshEngine(
             secureRandom.nextLong()
         )
 
-    private val scope =
+    @Volatile
+    private var scope =
+        newScope()
+
+    private fun newScope() =
         CoroutineScope(
             SupervisorJob() +
                 Dispatchers.IO
@@ -216,6 +220,12 @@ class MeshEngine(
     }
 
     fun start():
+        if (
+            running
+        ) {
+            return true
+        }
+
         Boolean {
 
         if (
@@ -223,6 +233,9 @@ class MeshEngine(
         ) {
             return false
         }
+
+        scope =
+            newScope()
 
         MeshDiagnostics
             .resetForNewRun()
