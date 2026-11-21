@@ -128,6 +128,20 @@ fun DiagnosticsScreen(
             )
 
             DiagnosticRow(
+                "Congestion drops",
+                diagnostics
+                    .congestionDrops
+                    .toString()
+            )
+
+            DiagnosticRow(
+                "Link resets",
+                diagnostics
+                    .linkResets
+                    .toString()
+            )
+
+            DiagnosticRow(
                 "Authentication failures",
                 diagnostics
                     .decryptFailures
