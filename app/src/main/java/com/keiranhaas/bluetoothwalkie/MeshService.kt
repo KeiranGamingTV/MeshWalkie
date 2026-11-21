@@ -12,6 +12,9 @@ import com.keiranhaas.bluetoothwalkie.audio.WalkieAudioEngine
 import com.keiranhaas.bluetoothwalkie.mesh.MeshEngine
 import com.keiranhaas.bluetoothwalkie.prefs.AppPreferences
 import com.keiranhaas.bluetoothwalkie.prefs.RoomCodeStore
+import android.os.Handler
+import android.os.Looper
+import com.keiranhaas.bluetoothwalkie.mesh.TalkRequestResult
 
 class MeshService :
     Service() {
@@ -31,8 +34,25 @@ class MeshService :
     private var networkStarted =
         false
 
+    @Volatile
     private var transmitting =
         false
+
+    private val mainHandler =
+        Handler(Looper.getMainLooper())
+
+    private val transmitTimeout =
+        Runnable {
+
+            if (transmitting) {
+
+                stopTransmission()
+
+                MeshRuntime.postFloorNotice(
+                    "Transmission limit reached (${MAX_TRANSMIT_MS / 1000}s)"
+                )
+            }
+        }
 
     private var receivingSessionId:
         Long? =
@@ -80,25 +100,22 @@ class MeshService :
 
                 onVoiceStart = {
                     sessionId,
-                    callsign ->
+                    callsign,
+                    firstSequence ->
 
-                    if (
-                        !transmitting
-                    ) {
+                    receivingSessionId =
+                        sessionId
 
-                        receivingSessionId =
-                            sessionId
+                    MeshRuntime
+                        .setReceivingFrom(
+                            callsign
+                        )
 
-                        MeshRuntime
-                            .setReceivingFrom(
-                                callsign
-                            )
-
-                        audioEngine
-                            .beginRemoteSession(
-                                sessionId
-                            )
-                    }
+                    audioEngine
+                        .beginRemoteSession(
+                            sessionId,
+                            firstSequence
+                        )
                 },
 
                 onVoiceFrame = {
@@ -106,41 +123,31 @@ class MeshService :
                     sequence,
                     frame ->
 
-                    if (
-                        !transmitting
-                    ) {
+                    audioEngine
+                        .queueRemoteFrame(
+                            sessionId =
+                                sessionId,
 
-                        audioEngine
-                            .queueRemoteFrame(
-                                sessionId =
-                                    sessionId,
+                            sequence =
+                                sequence,
 
-                                sequence =
-                                    sequence,
-
-                                encoded =
-                                    frame
-                            )
-                    }
+                            encoded =
+                                frame
+                        )
                 },
 
                 onVoiceEnd = {
                     sessionId,
                     endSequence ->
 
-                    if (
-                        !transmitting
-                    ) {
+                    audioEngine
+                        .endRemoteSession(
+                            sessionId =
+                                sessionId,
 
-                        audioEngine
-                            .endRemoteSession(
-                                sessionId =
-                                    sessionId,
-
-                                endSequence =
-                                    endSequence
-                            )
-                    }
+                            endSequence =
+                                endSequence
+                        )
 
                     if (
                         receivingSessionId ==
@@ -154,6 +161,25 @@ class MeshService :
                             .setReceivingFrom(
                                 null
                             )
+                    }
+                },
+
+                onTransmitPreempted = {
+                    winner ->
+
+                    mainHandler.post {
+
+                        if (
+                            transmitting
+                        ) {
+
+                            stopTransmission()
+
+                            MeshRuntime
+                                .postFloorNotice(
+                                    "Channel taken by $winner"
+                                )
+                        }
                     }
                 },
 
@@ -408,6 +434,25 @@ class MeshService :
             return
         }
 
+        when (
+            val result =
+                meshEngine.beginTalking()
+        ) {
+
+            is TalkRequestResult.Granted -> Unit
+
+            is TalkRequestResult.Busy -> {
+
+                MeshRuntime.postFloorNotice(
+                    "Channel busy — ${result.callsign} is talking"
+                )
+
+                return
+            }
+
+            is TalkRequestResult.NotRunning -> return
+        }
+
         audioEngine
             .clearRemoteReception()
 
@@ -423,9 +468,6 @@ class MeshService :
             microphoneActive =
                 true
         )
-
-        meshEngine
-            .beginTalking()
 
         val started =
             audioEngine
@@ -470,6 +512,11 @@ class MeshService :
             .setStatus(
                 "Encrypted transmission on channel ${preferences.channel}"
             )
+
+        mainHandler.postDelayed(
+            transmitTimeout,
+            MAX_TRANSMIT_MS
+        )
     }
 
     private fun stopTransmission() {
@@ -479,6 +526,10 @@ class MeshService :
         ) {
             return
         }
+
+        mainHandler.removeCallbacks(
+            transmitTimeout
+        )
 
         audioEngine
             .stopCapture()
@@ -629,6 +680,10 @@ class MeshService :
 
     override fun onDestroy() {
 
+        mainHandler.removeCallbacks(
+            transmitTimeout
+        )
+
         try {
             audioEngine.shutdown()
         } catch (_: Exception) {
@@ -688,5 +743,8 @@ class MeshService :
 
         private const val NOTIFICATION_ID =
             1001
+
+        private const val MAX_TRANSMIT_MS =
+            60_000L
     }
 }
