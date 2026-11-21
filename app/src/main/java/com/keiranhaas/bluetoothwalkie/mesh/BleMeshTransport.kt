@@ -35,6 +35,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.withTimeoutOrNull
 
 @SuppressLint("MissingPermission")
 class BleMeshTransport(
@@ -107,6 +108,18 @@ class BleMeshTransport(
         >()
 
     private val nextConnectAllowed =
+        ConcurrentHashMap<
+            String,
+            Long
+        >()
+
+    private val pendingGatts =
+        ConcurrentHashMap<
+            String,
+            BluetoothGatt
+        >()
+
+    private val connectStartedAt =
         ConcurrentHashMap<
             String,
             Long
