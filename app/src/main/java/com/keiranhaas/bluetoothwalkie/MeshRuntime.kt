@@ -14,7 +14,9 @@ data class MeshUiState(
     val channel: Int = 1,
     val roomCodeConfigured: Boolean = false,
     val status: String = "Mesh stopped",
-    val bluetoothSupported: Boolean = true
+    val bluetoothSupported: Boolean = true,
+    val bluetoothSupported: Boolean = true,
+    val floorNoticeSerial: Long = 0
 )
 
 object MeshRuntime {
@@ -75,6 +77,19 @@ object MeshRuntime {
         mutableState.update {
             it.copy(
                 status = status
+            )
+        }
+    }
+
+    /** Sets the status text and signals the UI to give "denied" haptic feedback. */
+    fun postFloorNotice(
+        message: String
+    ) {
+        mutableState.update {
+            it.copy(
+                status = message,
+                floorNoticeSerial =
+                    it.floorNoticeSerial + 1
             )
         }
     }
