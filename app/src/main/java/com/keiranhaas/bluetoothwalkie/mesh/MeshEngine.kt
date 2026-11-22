@@ -220,13 +220,13 @@ class MeshEngine(
     }
 
     fun start():
+            Boolean {
+
         if (
             running
         ) {
             return true
         }
-
-        Boolean {
 
         if (
             roomCrypto == null

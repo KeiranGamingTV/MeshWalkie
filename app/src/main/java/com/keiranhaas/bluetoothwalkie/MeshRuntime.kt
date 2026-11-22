@@ -15,7 +15,6 @@ data class MeshUiState(
     val roomCodeConfigured: Boolean = false,
     val status: String = "Mesh stopped",
     val bluetoothSupported: Boolean = true,
-    val bluetoothSupported: Boolean = true,
     val floorNoticeSerial: Long = 0
 )
 
