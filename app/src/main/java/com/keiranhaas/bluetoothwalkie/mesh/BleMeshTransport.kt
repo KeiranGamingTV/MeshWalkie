@@ -36,6 +36,7 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.withTimeoutOrNull
+import java.nio.ByteBuffer
 
 @SuppressLint("MissingPermission")
 class BleMeshTransport(
@@ -144,6 +145,11 @@ class BleMeshTransport(
     private var rssiJob:
         Job? =
         null
+
+    /** Set by the engine before start(). Served to peers over GATT. */
+    @Volatile
+    var localNodeId: Long =
+        0L
 
     @Volatile
     private var started =
@@ -257,6 +263,18 @@ class BleMeshTransport(
 
         service.addCharacteristic(
             receiveCharacteristic
+        )
+
+        service.addCharacteristic(
+            BluetoothGattCharacteristic(
+                NODE_ID_CHARACTERISTIC_UUID,
+
+                BluetoothGattCharacteristic
+                    .PROPERTY_READ,
+
+                BluetoothGattCharacteristic
+                    .PERMISSION_READ
+            )
         )
 
         if (
@@ -459,21 +477,23 @@ class BleMeshTransport(
         callsign: String
     ) {
 
-        peers[address]
-            ?.let {
-                peer ->
-
-                peer.nodeId =
-                    nodeId
-
-                peer.callsign =
-                    callsign
+        val peer =
+            peers.values.firstOrNull {
+                it.nodeId == nodeId
             }
+                ?: peers[address]
+                ?: return
+
+        peer.nodeId =
+            nodeId
+
+        peer.callsign =
+            callsign
 
         MeshDiagnostics
             .setPeerIdentity(
                 address =
-                    address,
+                    peer.address,
                 nodeId =
                     nodeId,
                 callsign =
@@ -614,6 +634,8 @@ class BleMeshTransport(
 
                     checkLinkHealth()
 
+                    publishLinkQuality()
+
                     delay(
                         RSSI_POLL_INTERVAL_MS
                     )
@@ -736,6 +758,177 @@ class BleMeshTransport(
         }
 
         startScanning()
+    }
+
+    private fun requestPeerNodeId(
+        peer: PeerConnection
+    ) {
+
+        scope.launch {
+
+            repeat(
+                NODE_ID_READ_ATTEMPTS
+            ) {
+
+                if (
+                    peer.nodeId != null ||
+                    !started
+                ) {
+                    return@launch
+                }
+
+                val characteristic =
+                    peer.gatt
+                        .getService(
+                            SERVICE_UUID
+                        )
+                        ?.getCharacteristic(
+                            NODE_ID_CHARACTERISTIC_UUID
+                        )
+                        ?: return@launch
+
+                val issued =
+                    try {
+                        peer.gatt
+                            .readCharacteristic(
+                                characteristic
+                            )
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                if (
+                    issued
+                ) {
+                    return@launch
+                }
+
+                delay(
+                    NODE_ID_RETRY_DELAY_MS
+                )
+            }
+        }
+    }
+
+    private fun handleNodeIdRead(
+        gatt: BluetoothGatt,
+        characteristic:
+            BluetoothGattCharacteristic,
+        value: ByteArray?,
+        status: Int
+    ) {
+
+        if (
+            status !=
+                BluetoothGatt
+                    .GATT_SUCCESS ||
+            characteristic.uuid !=
+                NODE_ID_CHARACTERISTIC_UUID ||
+            value == null ||
+            value.size != 8
+        ) {
+            return
+        }
+
+        val peer =
+            peers[
+                gatt.device.address
+            ]
+                ?: return
+
+        val nodeId =
+            ByteBuffer
+                .wrap(value)
+                .long
+
+        peer.nodeId =
+            nodeId
+
+        peer.lastLinkOkMs =
+            System.currentTimeMillis()
+
+        MeshDiagnostics
+            .updatePeerLink(
+                address =
+                    peer.address,
+                nodeId =
+                    nodeId
+            )
+    }
+
+    /**
+     * 0-100 score. Penalises weak signal, a backed-up
+     * send queue, recent write failures and silence.
+     */
+    private fun computeLinkQuality(
+        peer: PeerConnection
+    ): Int {
+
+        var penalty =
+            0
+
+        peer.rssi?.let {
+            rssi ->
+
+            penalty +=
+                (
+                    (-70 - rssi)
+                        .coerceIn(0, 30) *
+                        40
+                    ) / 30
+        }
+
+        penalty +=
+            (
+                (
+                    peer.sendQueue.depth *
+                        30
+                    ) /
+                    PeerSendQueue
+                        .MAX_NORMAL_PACKETS
+                )
+                .coerceAtMost(30)
+
+        penalty +=
+            (
+                peer.consecutiveWriteFailures *
+                    5
+                )
+                .coerceAtMost(20)
+
+        if (
+            System.currentTimeMillis() -
+            peer.lastLinkOkMs >
+            10_000L
+        ) {
+            penalty +=
+                10
+        }
+
+        return (100 - penalty)
+            .coerceIn(0, 100)
+    }
+
+    private fun publishLinkQuality() {
+
+        for (
+            peer in
+            peers.values
+        ) {
+
+            MeshDiagnostics
+                .updatePeerLink(
+                    address =
+                        peer.address,
+                    quality =
+                        computeLinkQuality(
+                            peer
+                        ),
+                    queueDepth =
+                        peer.sendQueue
+                            .depth
+                )
+        }
     }
 
     private fun connectToDevice(
@@ -1472,6 +1665,65 @@ class BleMeshTransport(
         object :
             BluetoothGattServerCallback() {
 
+            override fun onCharacteristicReadRequest(
+                device: BluetoothDevice,
+                requestId: Int,
+                offset: Int,
+                characteristic:
+                    BluetoothGattCharacteristic
+            ) {
+
+                val status: Int
+                var value: ByteArray? = null
+
+                if (
+                    characteristic.uuid ==
+                    NODE_ID_CHARACTERISTIC_UUID
+                ) {
+
+                    val full =
+                        ByteBuffer
+                            .allocate(8)
+                            .putLong(localNodeId)
+                            .array()
+
+                    if (
+                        offset in 0..full.size
+                    ) {
+                        value =
+                            full.copyOfRange(
+                                offset,
+                                full.size
+                            )
+
+                        status =
+                            BluetoothGatt
+                                .GATT_SUCCESS
+                    } else {
+                        status =
+                            BluetoothGatt
+                                .GATT_INVALID_OFFSET
+                    }
+
+                } else {
+                    status =
+                        BluetoothGatt
+                            .GATT_FAILURE
+                }
+
+                try {
+                    gattServer
+                        ?.sendResponse(
+                            device,
+                            requestId,
+                            status,
+                            offset,
+                            value
+                        )
+                } catch (_: Exception) {
+                }
+            }
+
             override fun onServiceAdded(
                 status: Int,
                 service:
@@ -1770,32 +2022,70 @@ class BleMeshTransport(
                 status: Int
             ) {
 
-                if (
-                    status !=
-                    BluetoothGatt
-                        .GATT_SUCCESS
-                ) {
-                    return
-                }
-
                 val peer =
                     peers[
                         gatt.device.address
                     ]
                         ?: return
 
-                peer.mtu =
-                    mtu.coerceAtLeast(
-                        DEFAULT_MTU
-                    )
+                if (
+                    status ==
+                    BluetoothGatt
+                        .GATT_SUCCESS
+                ) {
 
-                MeshDiagnostics
-                    .updatePeerLink(
-                        address =
-                            peer.address,
-                        mtu =
-                            peer.mtu
-                    )
+                    peer.mtu =
+                        mtu.coerceAtLeast(
+                            DEFAULT_MTU
+                        )
+
+                    MeshDiagnostics
+                        .updatePeerLink(
+                            address =
+                                peer.address,
+                            mtu =
+                                peer.mtu
+                        )
+                }
+
+                requestPeerNodeId(
+                    peer
+                )
+            }
+
+            override fun onCharacteristicRead(
+                gatt: BluetoothGatt,
+                characteristic:
+                    BluetoothGattCharacteristic,
+                value: ByteArray,
+                status: Int
+            ) {
+
+                handleNodeIdRead(
+                    gatt,
+                    characteristic,
+                    value,
+                    status
+                )
+            }
+
+            @Suppress(
+                "DEPRECATION",
+                "OVERRIDE_DEPRECATION"
+            )
+            override fun onCharacteristicRead(
+                gatt: BluetoothGatt,
+                characteristic:
+                    BluetoothGattCharacteristic,
+                status: Int
+            ) {
+
+                handleNodeIdRead(
+                    gatt,
+                    characteristic,
+                    characteristic.value,
+                    status
+                )
             }
 
             override fun onReadRemoteRssi(
@@ -1803,7 +2093,7 @@ class BleMeshTransport(
                 rssi: Int,
                 status: Int
             ) {
-
+.
                 if (
                     status !=
                     BluetoothGatt
@@ -1970,5 +2260,17 @@ class BleMeshTransport(
 
         private const val MAX_RECONNECT_DELAY_MS =
             15_000L
+
+        val NODE_ID_CHARACTERISTIC_UUID:
+            UUID =
+            UUID.fromString(
+                "a8c22102-8d5d-4eb9-a4de-9c6d23d81410"
+            )
+
+        private const val NODE_ID_READ_ATTEMPTS =
+            5
+
+        private const val NODE_ID_RETRY_DELAY_MS =
+            300L
     }
 }
