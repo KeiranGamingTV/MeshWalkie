@@ -240,6 +240,9 @@ class MeshEngine(
         MeshDiagnostics
             .resetForNewRun()
 
+        transport.localNodeId =
+            nodeId
+
         val started =
             transport.start()
 
