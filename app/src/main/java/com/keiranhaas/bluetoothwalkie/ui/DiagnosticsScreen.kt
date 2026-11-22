@@ -326,6 +326,20 @@ fun DiagnosticsScreen(
                             )
 
                             DiagnosticRow(
+                                "Link quality",
+                                peer.linkQuality
+                                    ?.let {
+                                        "$it% · ${qualityLabel(it)}"
+                                    }
+                                    ?: "Measuring"
+                            )
+
+                            DiagnosticRow(
+                                "Send queue",
+                                "${peer.queueDepth} packets"
+                            )
+
+                            DiagnosticRow(
                                 "MTU",
                                 "${peer.mtu} bytes"
                             )
@@ -444,3 +458,13 @@ private fun DiagnosticRow(
         )
     }
 }
+
+private fun qualityLabel(
+    quality: Int
+): String =
+    when {
+        quality >= 80 -> "Excellent"
+        quality >= 60 -> "Good"
+        quality >= 40 -> "Fair"
+        else -> "Poor"
+    }
