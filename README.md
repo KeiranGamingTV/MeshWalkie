@@ -14,7 +14,7 @@ No internet. No cellular. No Wi-Fi. No server.
 </div>
 
 > [!NOTE]
-> MeshWalkie is in **early development**. v0.2.0 is the first release. The code is feature-complete for its milestone but has **not yet been validated on multiple physical devices**. Expect rough edges, and please read [Development Status](#development-status).
+> MeshWalkie is in **early development**. The code is feature-complete for its milestone but has **not yet been validated on multiple physical devices**. Expect rough edges, and please read [Development Status](#development-status).
 
 ---
 
