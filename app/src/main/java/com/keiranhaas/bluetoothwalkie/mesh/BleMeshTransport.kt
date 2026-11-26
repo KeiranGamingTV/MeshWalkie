@@ -2093,7 +2093,6 @@ class BleMeshTransport(
                 rssi: Int,
                 status: Int
             ) {
-.
                 if (
                     status !=
                     BluetoothGatt
