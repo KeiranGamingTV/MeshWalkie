@@ -15,6 +15,8 @@ data class PeerDiagnostic(
     val rssi: Int? = null,
     val reconnectAttempts: Int = 0,
     val connectedAtMs: Long? = null,
+    val linkQuality: Int? = null,
+    val queueDepth: Int = 0,
     val lastSeenMs: Long =
         System.currentTimeMillis()
 )
@@ -186,7 +188,10 @@ object MeshDiagnostics {
     fun updatePeerLink(
         address: String,
         mtu: Int? = null,
-        rssi: Int? = null
+        rssi: Int? = null,
+        quality: Int? = null,
+        queueDepth: Int? = null,
+        nodeId: Long? = null
     ) {
 
         synchronized(lock) {
@@ -206,6 +211,15 @@ object MeshDiagnostics {
                     rssi =
                         rssi
                             ?: previous.rssi,
+                    linkQuality =
+                        quality
+                            ?: previous.linkQuality,
+                    queueDepth =
+                        queueDepth
+                            ?: previous.queueDepth,
+                    nodeId =
+                        nodeId
+                            ?: previous.nodeId,
                     lastSeenMs =
                         System.currentTimeMillis()
                 )
