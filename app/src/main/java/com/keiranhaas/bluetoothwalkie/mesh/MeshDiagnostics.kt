@@ -44,6 +44,7 @@ data class MeshDiagnosticsState(
 
     val duplicatesDropped: Long = 0,
     val decryptFailures: Long = 0,
+    val stalePacketsDropped: Long = 0,
 
     val voiceFramesReceived: Long = 0,
     val voiceFramesLost: Long = 0,
@@ -434,6 +435,20 @@ object MeshDiagnostics {
                             .value
                             .decryptFailures +
                             1
+                )
+        }
+    }
+
+    fun recordStalePacketDropped() {
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    stalePacketsDropped =
+                        mutableState
+                            .value
+                            .stalePacketsDropped +
+                                1
                 )
         }
     }

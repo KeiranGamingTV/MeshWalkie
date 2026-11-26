@@ -34,7 +34,8 @@ data class MeshPacket(
     val packetId: Long,
     val sessionId: Long,
     val sequence: Int,
-    val payload: ByteArray
+    val payload: ByteArray,
+    val timestampMs: Long = 0L
 )
 
 data class MeshEnvelope(
@@ -62,13 +63,13 @@ object MeshPacketCodec {
         0x4D57
 
     private const val VERSION =
-        2
+        3
 
     private const val ENVELOPE_HEADER_SIZE =
         46
 
     private const val PLAINTEXT_HEADER_SIZE =
-        15
+        23
 
     private const val MAX_PAYLOAD =
         16 * 1024
@@ -497,6 +498,10 @@ object MeshPacketCodec {
             packet.sequence
         )
 
+        buffer.putLong(
+            packet.timestampMs
+        )
+
         buffer.putShort(
             packet.payload
                 .size
@@ -547,6 +552,9 @@ object MeshPacketCodec {
             val sequence =
                 buffer.int
 
+            val timestampMs =
+                buffer.long
+
             val payloadLength =
                 buffer.short
                     .toInt() and
@@ -584,7 +592,9 @@ object MeshPacketCodec {
                 sequence =
                     sequence,
                 payload =
-                    payload
+                    payload,
+                timestampMs =
+                    timestampMs
             )
 
         } catch (_: Exception) {

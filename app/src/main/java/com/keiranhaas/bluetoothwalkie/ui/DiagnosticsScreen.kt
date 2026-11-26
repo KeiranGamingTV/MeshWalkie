@@ -146,6 +146,13 @@ fun DiagnosticsScreen(
                     .decryptFailures
                     .toString()
             )
+
+            DiagnosticRow(
+                "Stale/replayed packets",
+                diagnostics
+                    .stalePacketsDropped
+                    .toString()
+            )
         }
 
         DiagnosticSection(

@@ -489,7 +489,10 @@ class MeshEngine(
                     sequence,
 
                 payload =
-                    payload
+                    payload,
+
+                timestampMs =
+                    System.currentTimeMillis()
             )
 
         val control =
@@ -547,12 +550,6 @@ class MeshEngine(
                 )
                 ?: return
 
-        /*
-         * A directly received packet has
-         * envelope.hops == 0, therefore
-         * the actual path distance to us
-         * is hops + 1.
-         */
         val pathHops =
             envelope.hops + 1
 
@@ -562,7 +559,7 @@ class MeshEngine(
             )
 
         if (
-            !markSeen(
+            isSeen(
                 envelope
             )
         ) {
@@ -577,19 +574,28 @@ class MeshEngine(
             envelope.originId ==
             nodeId
         ) {
+
+            markSeen(
+                envelope
+            )
+
             return
         }
 
         val crypto =
             roomCrypto
 
-        if (
+        val forThisRoom =
             crypto != null &&
-            envelope.channel ==
-                currentChannel &&
-            crypto.matchesRoomTag(
-                envelope.roomTag
-            )
+                    envelope.channel ==
+                    currentChannel &&
+                    crypto.matchesRoomTag(
+                        envelope.roomTag
+                    )
+
+        if (
+            forThisRoom &&
+            crypto != null
         ) {
 
             val packet =
@@ -607,17 +613,58 @@ class MeshEngine(
                 MeshDiagnostics
                     .recordDecryptFailure()
 
-            } else {
-
-                handleLocalPacket(
-                    sourceAddress =
-                        sourceAddress,
-                    envelope =
-                        envelope,
-                    packet =
-                        packet
-                )
+                return
             }
+
+            val skew =
+                kotlin.math.abs(
+                    System
+                        .currentTimeMillis() -
+                            packet.timestampMs
+                )
+
+            if (
+                skew >
+                MAX_CLOCK_SKEW_MS
+            ) {
+
+                MeshDiagnostics
+                    .recordStalePacketDropped()
+
+                return
+            }
+
+            if (
+                !markSeen(
+                    envelope
+                )
+            ) {
+
+                MeshDiagnostics
+                    .recordDuplicateDropped()
+
+                return
+            }
+
+            handleLocalPacket(
+                sourceAddress =
+                    sourceAddress,
+                envelope =
+                    envelope,
+                packet =
+                    packet
+            )
+
+        } else if (
+            !markSeen(
+                envelope
+            )
+        ) {
+
+            MeshDiagnostics
+                .recordDuplicateDropped()
+
+            return
         }
 
         val relayed =
@@ -852,6 +899,30 @@ class MeshEngine(
             }
     }
 
+    private fun isSeen(
+        envelope: MeshEnvelope
+    ): Boolean {
+
+        val key =
+            SeenKey(
+                originId =
+                    envelope.originId,
+
+                packetId =
+                    envelope.packetId
+            )
+
+        synchronized(
+            seenPackets
+        ) {
+
+            return seenPackets
+                .containsKey(
+                    key
+                )
+        }
+    }
+
     private fun markSeen(
         envelope: MeshEnvelope
     ): Boolean {
@@ -915,7 +986,10 @@ class MeshEngine(
             4
 
         private const val SEEN_PACKET_LIMIT =
-            8192
+            16384
+
+        private const val MAX_CLOCK_SKEW_MS =
+            300_000L
 
         private const val ANNOUNCE_INTERVAL_MS =
             15_000L
