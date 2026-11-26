@@ -50,6 +50,8 @@ data class MeshDiagnosticsState(
 
     val congestionDrops: Long = 0,
     val linkResets: Long = 0,
+    val jitterTargetMs: Int = 120,
+    val framesTrimmed: Long = 0,
 
     val lastHopCount: Int = 0,
     val maximumHopCount: Int = 0,
@@ -496,6 +498,33 @@ object MeshDiagnostics {
                             .value
                             .linkResets +
                             1
+                )
+        }
+    }
+
+    fun updateJitterTarget(
+        targetMs: Int
+    ) {
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    jitterTargetMs =
+                        targetMs
+                )
+        }
+    }
+
+    fun recordFrameTrimmed() {
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    framesTrimmed =
+                        mutableState
+                            .value
+                            .framesTrimmed +
+                                1
                 )
         }
     }

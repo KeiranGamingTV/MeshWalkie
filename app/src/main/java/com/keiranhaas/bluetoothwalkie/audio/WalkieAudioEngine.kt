@@ -19,6 +19,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.TreeMap
 import kotlin.math.max
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 
 class WalkieAudioEngine(
     context: Context
@@ -52,6 +54,26 @@ class WalkieAudioEngine(
 
     private var encoderStepIndex =
         0
+
+    private var noiseSuppressor:
+            NoiseSuppressor? =
+        null
+
+    private var automaticGainControl:
+            AutomaticGainControl? =
+        null
+
+    private val voiceFilter =
+        VoiceFilter()
+
+    private var adaptiveTargetMs =
+        JITTER_TARGET_MS
+
+    private var lastJitterIssueMs =
+        SystemClock.elapsedRealtime()
+
+    private var lastTargetChangeMs =
+        SystemClock.elapsedRealtime()
 
     private val receiveLock =
         Any()
@@ -111,7 +133,7 @@ class WalkieAudioEngine(
                 AudioRecord(
                     MediaRecorder
                         .AudioSource
-                        .MIC,
+                        .VOICE_COMMUNICATION,
 
                     SAMPLE_RATE,
 
@@ -166,6 +188,12 @@ class WalkieAudioEngine(
 
         encoderStepIndex =
             0
+
+        voiceFilter.reset()
+
+        attachCaptureEffects(
+            newRecorder.audioSessionId
+        )
 
         captureJob =
             scope.launch {
@@ -227,6 +255,8 @@ class WalkieAudioEngine(
                         continue
                     }
 
+                    voiceFilter.process(frame)
+
                     val encoded =
                         ImaAdpcm.encode(
                             samples =
@@ -266,6 +296,8 @@ class WalkieAudioEngine(
         captureJob =
             null
 
+        releaseCaptureEffects()
+
         try {
             current?.release()
         } catch (_: Exception) {
@@ -273,6 +305,63 @@ class WalkieAudioEngine(
 
         encoderStepIndex =
             0
+    }
+
+    private fun attachCaptureEffects(
+        audioSessionId: Int
+    ) {
+
+        releaseCaptureEffects()
+
+        try {
+            if (
+                NoiseSuppressor.isAvailable()
+            ) {
+                noiseSuppressor =
+                    NoiseSuppressor
+                        .create(audioSessionId)
+                        ?.also {
+                                effect ->
+
+                            effect.setEnabled(true)
+                        }
+            }
+        } catch (_: Exception) {
+            noiseSuppressor = null
+        }
+
+        try {
+            if (
+                AutomaticGainControl.isAvailable()
+            ) {
+                automaticGainControl =
+                    AutomaticGainControl
+                        .create(audioSessionId)
+                        ?.also {
+                                effect ->
+
+                            effect.setEnabled(true)
+                        }
+            }
+        } catch (_: Exception) {
+            automaticGainControl = null
+        }
+    }
+
+    private fun releaseCaptureEffects() {
+
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Exception) {
+        }
+
+        try {
+            automaticGainControl?.release()
+        } catch (_: Exception) {
+        }
+
+        noiseSuppressor = null
+        automaticGainControl = null
     }
 
     fun beginRemoteSession(
@@ -322,25 +411,25 @@ class WalkieAudioEngine(
 
             if (
                 session == null ||
-                session.sessionId !=
-                    sessionId
+                session.sessionId != sessionId
             ) {
 
                 session =
                     createReceiveSession(
                         sessionId =
                             sessionId,
-
                         firstSequence =
                             sequence
-                                .coerceAtLeast(
-                                    1
-                                )
+                                .coerceAtLeast(1)
                     )
 
                 receiveSession =
                     session
             }
+
+            val now =
+                SystemClock
+                    .elapsedRealtime()
 
             if (
                 sequence <
@@ -350,12 +439,16 @@ class WalkieAudioEngine(
                 MeshDiagnostics
                     .recordLateFrameDropped()
 
+                growJitterTarget(
+                    session,
+                    now
+                )
+
                 return
             }
 
             session.lastActivityMs =
-                SystemClock
-                    .elapsedRealtime()
+                now
 
             if (
                 session.frames.size >=
@@ -367,13 +460,10 @@ class WalkieAudioEngine(
                         .lastKey()
 
                 if (
-                    largest >
-                    sequence
+                    largest > sequence
                 ) {
                     session.frames
-                        .remove(
-                            largest
-                        )
+                        .remove(largest)
                 } else {
                     return
                 }
@@ -386,6 +476,61 @@ class WalkieAudioEngine(
                 )
         }
     }
+
+    private fun growJitterTarget(
+        session: ReceiveSession,
+        now: Long
+    ) {
+
+        lastJitterIssueMs =
+            now
+
+        if (
+            now - lastTargetChangeMs <
+            TARGET_CHANGE_INTERVAL_MS
+        ) {
+            return
+        }
+
+        val raised =
+            (
+                    adaptiveTargetMs +
+                            FRAME_DURATION_MS
+                    )
+                .coerceAtMost(
+                    MAX_JITTER_TARGET_MS
+                )
+
+        if (
+            raised == adaptiveTargetMs
+        ) {
+            return
+        }
+
+        adaptiveTargetMs =
+            raised
+
+        lastTargetChangeMs =
+            now
+
+        session.nextPlayoutMs +=
+            FRAME_DURATION_MS
+
+        MeshDiagnostics
+            .updateJitterTarget(
+                raised.toInt()
+            )
+    }
+
+    private fun targetFrames():
+            Int =
+        (
+                (
+                        adaptiveTargetMs +
+                                FRAME_DURATION_MS - 1
+                        ) /
+                        FRAME_DURATION_MS
+                ).toInt()
 
     fun endRemoteSession(
         sessionId: Long,
@@ -439,17 +584,40 @@ class WalkieAudioEngine(
             SystemClock
                 .elapsedRealtime()
 
+        if (
+            adaptiveTargetMs >
+            MIN_JITTER_TARGET_MS &&
+            now - lastJitterIssueMs >
+            SHRINK_AFTER_STABLE_MS &&
+            now - lastTargetChangeMs >
+            SHRINK_AFTER_STABLE_MS
+        ) {
+
+            adaptiveTargetMs =
+                (
+                        adaptiveTargetMs -
+                                FRAME_DURATION_MS
+                        )
+                    .coerceAtLeast(
+                        MIN_JITTER_TARGET_MS
+                    )
+
+            lastTargetChangeMs =
+                now
+        }
+
+        MeshDiagnostics
+            .updateJitterTarget(
+                adaptiveTargetMs.toInt()
+            )
+
         return ReceiveSession(
             sessionId =
                 sessionId,
-
             expectedSequence =
                 firstSequence,
-
             nextPlayoutMs =
-                now +
-                    JITTER_TARGET_MS,
-
+                now + adaptiveTargetMs,
             lastActivityMs =
                 now
         )
@@ -504,8 +672,7 @@ class WalkieAudioEngine(
                 ?: return null
 
         if (
-            now -
-                session.lastActivityMs >
+            now - session.lastActivityMs >
             RECEIVE_IDLE_TIMEOUT_MS &&
             session.frames.isEmpty()
         ) {
@@ -517,10 +684,33 @@ class WalkieAudioEngine(
         }
 
         if (
-            now <
-            session.nextPlayoutMs
+            now < session.nextPlayoutMs
         ) {
             return null
+        }
+
+        val excess =
+            session.frames.size -
+                    targetFrames()
+
+        if (
+            excess > TRIM_SLACK_FRAMES &&
+            now - session.lastTrimMs >=
+            TRIM_INTERVAL_MS
+        ) {
+
+            session.frames
+                .remove(
+                    session.expectedSequence
+                )
+
+            session.expectedSequence++
+
+            session.lastTrimMs =
+                now
+
+            MeshDiagnostics
+                .recordFrameTrimmed()
         }
 
         val endSequence =
@@ -529,7 +719,7 @@ class WalkieAudioEngine(
         if (
             endSequence != null &&
             session.expectedSequence >=
-                endSequence
+            endSequence
         ) {
 
             receiveSession =
@@ -542,55 +732,49 @@ class WalkieAudioEngine(
             session.expectedSequence
 
         val encoded =
-            session.frames.remove(
-                sequence
-            )
+            session.frames
+                .remove(sequence)
 
         session.expectedSequence++
 
         session.nextPlayoutMs +=
             FRAME_DURATION_MS
 
-        return if (
+        if (
             encoded != null
         ) {
 
             session.consecutiveLosses =
                 0
 
-            PlayoutDecision(
+            return PlayoutDecision(
                 sessionId =
                     session.sessionId,
-
                 encoded =
                     encoded,
-
                 previousPcm =
                     session.lastGoodPcm,
-
                 lossNumber =
                     0
             )
-
-        } else {
-
-            session.consecutiveLosses++
-
-            PlayoutDecision(
-                sessionId =
-                    session.sessionId,
-
-                encoded =
-                    null,
-
-                previousPcm =
-                    session.lastGoodPcm
-                        ?.copyOf(),
-
-                lossNumber =
-                    session.consecutiveLosses
-            )
         }
+
+        session.consecutiveLosses++
+
+        lastJitterIssueMs =
+            now
+
+        return PlayoutDecision(
+            sessionId =
+                session.sessionId,
+            encoded =
+                null,
+            previousPcm =
+                session.lastGoodPcm
+                    ?.copyOf(),
+            lossNumber =
+                session.consecutiveLosses
+        )
     }
 
     private fun processPlayoutDecision(
@@ -922,10 +1106,9 @@ class WalkieAudioEngine(
         var lastActivityMs: Long,
         var endSequence: Int? = null,
         var consecutiveLosses: Int = 0,
+        var lastTrimMs: Long = 0L,
         var lastGoodPcm: ShortArray? = null,
-        val frames:
-            TreeMap<Int, ByteArray> =
-            TreeMap()
+        val frames: TreeMap<Int, ByteArray> = TreeMap()
     )
 
     private data class PlayoutDecision(
@@ -953,6 +1136,24 @@ class WalkieAudioEngine(
          */
         private const val JITTER_TARGET_MS =
             120L
+
+        private const val MIN_JITTER_TARGET_MS =
+            80L
+
+        private const val MAX_JITTER_TARGET_MS =
+            400L
+
+        private const val TARGET_CHANGE_INTERVAL_MS =
+            500L
+
+        private const val SHRINK_AFTER_STABLE_MS =
+            15_000L
+
+        private const val TRIM_SLACK_FRAMES =
+            2
+
+        private const val TRIM_INTERVAL_MS =
+            160L
 
         private const val PLAYOUT_CHECK_MS =
             5L

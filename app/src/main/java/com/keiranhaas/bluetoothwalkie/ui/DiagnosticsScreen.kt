@@ -187,7 +187,14 @@ fun DiagnosticsScreen(
 
             DiagnosticRow(
                 "Jitter target",
-                "120 ms"
+                "${diagnostics.jitterTargetMs} ms"
+            )
+
+            DiagnosticRow(
+                "Frames trimmed",
+                diagnostics
+                    .framesTrimmed
+                    .toString()
             )
 
             DiagnosticRow(
