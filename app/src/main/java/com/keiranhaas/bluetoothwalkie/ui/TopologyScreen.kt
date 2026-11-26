@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -26,6 +25,7 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 import androidx.compose.ui.graphics.toArgb
+import android.graphics.Typeface
 
 @Composable
 fun TopologyScreen(
@@ -328,6 +328,8 @@ private fun TopologyGraph(
 
             val centerPaint =
                 Paint().apply {
+                    typeface =
+                        Typeface.MONOSPACE
 
                     color =
                         textColor
@@ -364,6 +366,8 @@ private fun TopologyGraph(
 
             val nodePaint =
                 Paint().apply {
+                    typeface =
+                        Typeface.MONOSPACE
 
                     color =
                         textColor

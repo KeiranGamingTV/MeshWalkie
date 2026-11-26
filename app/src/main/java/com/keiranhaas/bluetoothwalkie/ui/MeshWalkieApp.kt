@@ -13,19 +13,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -88,7 +84,8 @@ fun MeshWalkieApp(
             TopAppBar(
                 title = {
                     Text(
-                        "MeshWalkie"
+                        text = "> meshwalkie_",
+                        fontWeight = FontWeight.Bold
                     )
                 }
             )
@@ -248,7 +245,7 @@ private fun ScreenButton(
                 onClick
         ) {
             Text(
-                text
+                text.lowercase()
             )
         }
 
@@ -259,7 +256,7 @@ private fun ScreenButton(
                 onClick
         ) {
             Text(
-                text
+                text.lowercase()
             )
         }
     }
@@ -841,38 +838,42 @@ private fun PushToTalkButton(
 
     val busy =
         !transmitting &&
-            busyCallsign != null
+                busyCallsign != null
+
+    val scheme =
+        MaterialTheme.colorScheme
 
     val background =
         when {
+            !enabled -> scheme.surfaceVariant
+            transmitting -> scheme.errorContainer
+            busy -> scheme.tertiaryContainer
+            else -> scheme.primaryContainer
+        }
 
-            !enabled ->
-                MaterialTheme
-                    .colorScheme
-                    .surfaceVariant
-
-            transmitting ->
-                MaterialTheme
-                    .colorScheme
-                    .errorContainer
-
-            busy ->
-                MaterialTheme
-                    .colorScheme
-                    .tertiaryContainer
-
-            else ->
-                MaterialTheme
-                    .colorScheme
-                    .primaryContainer
+    val accent =
+        when {
+            !enabled -> scheme.outline
+            transmitting -> scheme.error
+            busy -> scheme.tertiary
+            else -> scheme.primary
         }
 
     Surface(
         shape =
-            CircleShape,
+            CutCornerShape(24.dp),
 
-        tonalElevation =
-            8.dp,
+        color =
+            background,
+
+        contentColor =
+            accent,
+
+        border =
+            BorderStroke(
+                3.dp,
+                accent
+            ),
 
         modifier =
             Modifier
@@ -907,11 +908,7 @@ private fun PushToTalkButton(
         Box(
             modifier =
                 Modifier
-                    .fillMaxSize()
-                    .background(
-                        background,
-                        CircleShape
-                    ),
+                    .fillMaxSize(),
 
             contentAlignment =
                 Alignment.Center
@@ -947,17 +944,20 @@ private fun PushToTalkButton(
                     text =
                         when {
                             transmitting ->
-                                "Release to stop"
+                                "release to stop"
 
                             busy ->
                                 "$busyCallsign is talking"
 
                             else ->
-                                "TO TALK"
+                                "to talk"
                         },
 
                     fontSize =
-                        18.sp
+                        16.sp,
+
+                    textAlign =
+                        TextAlign.Center
                 )
             }
         }
