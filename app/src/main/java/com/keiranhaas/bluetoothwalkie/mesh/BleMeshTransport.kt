@@ -221,6 +221,12 @@ class BleMeshTransport(
             return false
         }
 
+        MeshDiagnostics
+            .setLongRangeSupported(
+                localAdapter
+                    .isLeCodedPhySupported
+            )
+
         val server =
             bluetoothManager
                 .openGattServer(
@@ -908,6 +914,144 @@ class BleMeshTransport(
         return (100 - penalty)
             .coerceIn(0, 100)
     }
+
+    private fun adaptPhy(
+        peer: PeerConnection,
+        rssi: Int
+    ) {
+
+        if (
+            adapter?.isLeCodedPhySupported !=
+            true
+        ) {
+            return
+        }
+
+        if (
+            !peer.codedActive
+        ) {
+
+            peer.strongReadings =
+                0
+
+            if (
+                rssi <=
+                CODED_ENTER_RSSI
+            ) {
+
+                peer.weakReadings++
+
+                if (
+                    peer.weakReadings >=
+                    CODED_ENTER_READINGS
+                ) {
+
+                    peer.weakReadings =
+                        0
+
+                    peer.codedActive =
+                        true
+
+                    requestPhy(
+                        peer,
+                        true
+                    )
+                }
+
+            } else {
+                peer.weakReadings =
+                    0
+            }
+
+        } else {
+
+            peer.weakReadings =
+                0
+
+            if (
+                rssi >=
+                CODED_EXIT_RSSI
+            ) {
+
+                peer.strongReadings++
+
+                if (
+                    peer.strongReadings >=
+                    CODED_EXIT_READINGS
+                ) {
+
+                    peer.strongReadings =
+                        0
+
+                    peer.codedActive =
+                        false
+
+                    requestPhy(
+                        peer,
+                        false
+                    )
+                }
+
+            } else {
+                peer.strongReadings =
+                    0
+            }
+        }
+    }
+
+    private fun requestPhy(
+        peer: PeerConnection,
+        coded: Boolean
+    ) {
+
+        try {
+
+            if (coded) {
+
+                peer.gatt
+                    .setPreferredPhy(
+                        BluetoothDevice
+                            .PHY_LE_CODED_MASK,
+                        BluetoothDevice
+                            .PHY_LE_CODED_MASK,
+                        CODED_PHY_OPTION
+                    )
+
+            } else {
+
+                val fast =
+                    BluetoothDevice
+                        .PHY_LE_1M_MASK or
+                        BluetoothDevice
+                            .PHY_LE_2M_MASK
+
+                peer.gatt
+                    .setPreferredPhy(
+                        fast,
+                        fast,
+                        BluetoothDevice
+                            .PHY_OPTION_NO_PREFERRED
+                    )
+            }
+
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun phyLabel(
+        phy: Int
+    ): String =
+        when (phy) {
+
+            BluetoothDevice.PHY_LE_2M ->
+                "2M"
+
+            BluetoothDevice.PHY_LE_CODED ->
+                "Coded (long range)"
+
+            else ->
+                "1M"
+        }
 
     private fun publishLinkQuality() {
 
@@ -2163,6 +2307,18 @@ class BleMeshTransport(
 
         @Volatile
         var consecutiveWriteFailures: Int =
+            0
+
+        @Volatile
+        var codedActive: Boolean =
+            false
+
+        @Volatile
+        var weakReadings: Int =
+            0
+
+        @Volatile
+        var strongReadings: Int =
             0
 
         val sendQueue =
