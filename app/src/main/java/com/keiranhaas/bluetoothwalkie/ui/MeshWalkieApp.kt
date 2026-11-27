@@ -1,7 +1,8 @@
 package com.keiranhaas.bluetoothwalkie.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -345,12 +346,21 @@ private fun RadioScreen(
         }
     }
 
+    var pttHeld by
+        remember {
+            mutableStateOf(
+                false
+            )
+        }
+
     Column(
         modifier =
             Modifier
                 .fillMaxSize()
                 .verticalScroll(
-                    rememberScrollState()
+                    rememberScrollState(),
+                    enabled =
+                        !pttHeld
                 )
                 .padding(
                     20.dp
@@ -495,7 +505,11 @@ private fun RadioScreen(
                 onPttDown,
 
             onPttUp =
-                onPttUp
+                onPttUp,
+
+            onHoldChange = {
+                pttHeld = it
+            }
         )
 
         state.receivingFrom
@@ -833,7 +847,8 @@ private fun PushToTalkButton(
     transmitting: Boolean,
     busyCallsign: String?,
     onPttDown: () -> Unit,
-    onPttUp: () -> Unit
+    onPttUp: () -> Unit,
+    onHoldChange: (Boolean) -> Unit
 ) {
 
     val busy =
@@ -884,24 +899,52 @@ private fun PushToTalkButton(
                     enabled
                 ) {
 
-                    detectTapGestures(
-                        onPress = {
+                    awaitEachGesture {
 
-                            if (
-                                !enabled
-                            ) {
-                                return@detectTapGestures
-                            }
+                        val down =
+                            awaitFirstDown(
+                                requireUnconsumed =
+                                    false
+                            )
 
-                            onPttDown()
-
-                            try {
-                                awaitRelease()
-                            } finally {
-                                onPttUp()
-                            }
+                        if (
+                            !enabled
+                        ) {
+                            return@awaitEachGesture
                         }
-                    )
+
+                        down.consume()
+
+                        onHoldChange(true)
+
+                        onPttDown()
+
+                        try {
+
+                            do {
+
+                                val event =
+                                    awaitPointerEvent()
+
+                                event.changes
+                                    .forEach {
+                                        it.consume()
+                                    }
+
+                            } while (
+                                event.changes
+                                    .any {
+                                        it.pressed
+                                    }
+                            )
+
+                        } finally {
+
+                            onHoldChange(false)
+
+                            onPttUp()
+                        }
+                    }
                 }
     ) {
 
