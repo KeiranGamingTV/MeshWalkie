@@ -17,6 +17,7 @@ data class PeerDiagnostic(
     val connectedAtMs: Long? = null,
     val linkQuality: Int? = null,
     val queueDepth: Int = 0,
+    val phy: String = "1M",
     val lastSeenMs: Long =
         System.currentTimeMillis()
 )
@@ -45,6 +46,7 @@ data class MeshDiagnosticsState(
     val duplicatesDropped: Long = 0,
     val decryptFailures: Long = 0,
     val stalePacketsDropped: Long = 0,
+    val longRangeSupported: Boolean = false,
 
     val voiceFramesReceived: Long = 0,
     val voiceFramesLost: Long = 0,
@@ -192,7 +194,8 @@ object MeshDiagnostics {
         rssi: Int? = null,
         quality: Int? = null,
         queueDepth: Int? = null,
-        nodeId: Long? = null
+        nodeId: Long? = null,
+        phy: String? = null
     ) {
 
         synchronized(lock) {
@@ -221,6 +224,9 @@ object MeshDiagnostics {
                     nodeId =
                         nodeId
                             ?: previous.nodeId,
+                    phy =
+                        phy
+                            ?: previous.phy,
                     lastSeenMs =
                         System.currentTimeMillis()
                 )
@@ -449,6 +455,19 @@ object MeshDiagnostics {
                             .value
                             .stalePacketsDropped +
                                 1
+                )
+        }
+    }
+
+    fun setLongRangeSupported(
+        supported: Boolean
+    ) {
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    longRangeSupported =
+                        supported
                 )
         }
     }
