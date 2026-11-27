@@ -983,7 +983,7 @@ class MeshEngine(
          * bounded.
          */
         private const val INITIAL_TTL =
-            4
+            6
 
         private const val SEEN_PACKET_LIMIT =
             16384
