@@ -153,6 +153,18 @@ fun DiagnosticsScreen(
                     .stalePacketsDropped
                     .toString()
             )
+
+            DiagnosticRow(
+                "Long range (Coded PHY)",
+                if (
+                    diagnostics
+                        .longRangeSupported
+                ) {
+                    "Supported"
+                } else {
+                    "Not supported"
+                }
+            )
         }
 
         DiagnosticSection(
@@ -345,6 +357,11 @@ fun DiagnosticsScreen(
                                         "$it% · ${qualityLabel(it)}"
                                     }
                                     ?: "Measuring"
+                            )
+
+                            DiagnosticRow(
+                                "Radio mode",
+                                peer.phy
                             )
 
                             DiagnosticRow(
