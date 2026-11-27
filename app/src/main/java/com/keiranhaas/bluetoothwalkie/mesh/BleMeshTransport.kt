@@ -2264,6 +2264,43 @@ class BleMeshTransport(
                         rssi =
                             rssi
                     )
+
+                adaptPhy(
+                    peer,
+                    rssi
+                )
+            }
+
+            override fun onPhyUpdate(
+                gatt: BluetoothGatt,
+                txPhy: Int,
+                rxPhy: Int,
+                status: Int
+            ) {
+
+                if (
+                    status !=
+                    BluetoothGatt
+                        .GATT_SUCCESS
+                ) {
+                    return
+                }
+
+                val peer =
+                    peers[
+                        gatt.device.address
+                    ]
+                        ?: return
+
+                MeshDiagnostics
+                    .updatePeerLink(
+                        address =
+                            peer.address,
+                        phy =
+                            phyLabel(
+                                txPhy
+                            )
+                    )
             }
 
             override fun onServiceChanged(
@@ -2352,6 +2389,21 @@ class BleMeshTransport(
 
         private const val REQUESTED_MTU =
             247
+
+        private const val CODED_ENTER_RSSI =
+            -80
+
+        private const val CODED_EXIT_RSSI =
+            -70
+
+        private const val CODED_ENTER_READINGS =
+            1
+
+        private const val CODED_EXIT_READINGS =
+            3
+
+        private const val CODED_PHY_OPTION =
+            BluetoothDevice.PHY_OPTION_S8
 
         private const val DEFAULT_MTU =
             23
