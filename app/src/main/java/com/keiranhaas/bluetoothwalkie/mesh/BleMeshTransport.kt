@@ -37,6 +37,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.ByteBuffer
+import kotlinx.coroutines.channels.BufferOverflow
 
 @SuppressLint("MissingPermission")
 class BleMeshTransport(
@@ -304,6 +305,20 @@ class BleMeshTransport(
         started =
             true
 
+        scope.launch {
+
+            for (item in incoming) {
+
+                try {
+                    onPacketReceived(
+                        item.address,
+                        item.bytes
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+
         startScanning()
         startRssiMonitor()
 
@@ -507,6 +522,42 @@ class BleMeshTransport(
             )
     }
 
+    private class IncomingPacket(
+        val address: String,
+        val bytes: ByteArray
+    )
+
+    private val incoming =
+        Channel<IncomingPacket>(
+            capacity = 256,
+            onBufferOverflow =
+                BufferOverflow.DROP_OLDEST
+        )
+
+    @Volatile
+    private var activeScanMode =
+        -1
+
+    private fun updateScanMode() {
+
+        if (!started) {
+            return
+        }
+
+        val wanted =
+            if (peers.isEmpty()) {
+                ScanSettings
+                    .SCAN_MODE_LOW_LATENCY
+            } else {
+                ScanSettings
+                    .SCAN_MODE_BALANCED
+            }
+
+        if (wanted != activeScanMode) {
+            restartScanning()
+        }
+    }
+
     private fun startScanning() {
 
         val localScanner =
@@ -523,12 +574,23 @@ class BleMeshTransport(
                 )
                 .build()
 
+        val mode =
+            if (peers.isEmpty()) {
+                ScanSettings
+                    .SCAN_MODE_LOW_LATENCY
+            } else {
+                ScanSettings
+                    .SCAN_MODE_BALANCED
+            }
+
+        activeScanMode =
+            mode
+
         val settings =
             ScanSettings
                 .Builder()
                 .setScanMode(
-                    ScanSettings
-                        .SCAN_MODE_LOW_LATENCY
+                    mode
                 )
                 .build()
 
@@ -670,7 +732,10 @@ class BleMeshTransport(
                 now - peer.lastLinkOkMs >
                 LINK_DEAD_MS
             ) {
-                resetLink(peer)
+                resetLink(
+                    peer,
+                    "no response for 20 s"
+                )
             }
         }
 
@@ -697,11 +762,14 @@ class BleMeshTransport(
     }
 
     private fun resetLink(
-        peer: PeerConnection
+        peer: PeerConnection,
+        reason: String
     ) {
 
         MeshDiagnostics
-            .recordLinkReset()
+            .recordLinkReset(
+                reason
+            )
 
         removeConnectedPeer(
             gatt =
@@ -1211,11 +1279,6 @@ class BleMeshTransport(
             current != null
         ) {
 
-            /*
-             * Service discovery can repeat on the same
-             * connection. Only close a genuinely
-             * different duplicate connection.
-             */
             if (
                 current.gatt !== gatt
             ) {
@@ -1290,6 +1353,8 @@ class BleMeshTransport(
         onStatus(
             "Connected to ${peers.size} nearby peer(s)"
         )
+
+        updateScanMode()
     }
 
     private suspend fun runSender(
@@ -1351,17 +1416,33 @@ class BleMeshTransport(
                 peer.consecutiveWriteFailures =
                     0
 
+                peer.failureStreakStartMs =
+                    0L
+
             } else {
+
+                val now =
+                    System.currentTimeMillis()
+
+                if (
+                    peer.consecutiveWriteFailures ==
+                    0
+                ) {
+                    peer.failureStreakStartMs =
+                        now
+                }
 
                 peer.consecutiveWriteFailures++
 
                 if (
-                    peer.consecutiveWriteFailures >=
-                    MAX_CONSECUTIVE_WRITE_FAILURES
+                    now -
+                    peer.failureStreakStartMs >
+                    WRITE_STALL_RESET_MS
                 ) {
 
                     resetLink(
-                        peer
+                        peer,
+                        "writes stalled"
                     )
 
                     return
@@ -1374,11 +1455,6 @@ class BleMeshTransport(
         }
     }
 
-    /**
-     * Writes one fragment and waits for Android's
-     * onCharacteristicWrite callback before the next,
-     * so we never overrun the stack's write buffer.
-     */
     private suspend fun sendFragment(
         peer: PeerConnection,
         bytes: ByteArray
@@ -1499,6 +1575,8 @@ class BleMeshTransport(
         onPeerCountChanged(
             peers.size
         )
+
+        updateScanMode()
 
         if (
             reconnect &&
@@ -1970,9 +2048,11 @@ class BleMeshTransport(
                     null
                 ) {
 
-                    onPacketReceived(
-                        device.address,
-                        completePacket
+                    incoming.trySend(
+                        IncomingPacket(
+                            device.address,
+                            completePacket
+                        )
                     )
                 }
 
@@ -2066,6 +2146,11 @@ class BleMeshTransport(
 
                     BluetoothProfile
                         .STATE_DISCONNECTED -> {
+
+                        MeshDiagnostics
+                            .recordDisconnect(
+                                status
+                            )
 
                         removeConnectedPeer(
                             gatt =
@@ -2347,6 +2432,10 @@ class BleMeshTransport(
             0
 
         @Volatile
+        var failureStreakStartMs: Long =
+            0L
+
+        @Volatile
         var codedActive: Boolean =
             false
 
@@ -2408,34 +2497,24 @@ class BleMeshTransport(
         private const val DEFAULT_MTU =
             23
 
-        /*
-         * ATT write-command overhead is
-         * three bytes.
-         */
         private const val ATT_OVERHEAD_BYTES =
             3
 
         private const val MINIMUM_WRITE_SIZE =
             20
 
-        /*
-         * Pace writes by Android's onCharacteristicWrite
-         * callback. If voice stutters or link resets climb
-         * with phones close together, set this to false to
-         * return to the old fixed-delay pacing.
-         */
         private const val USE_WRITE_ACK =
             true
 
         private const val WRITE_ACK_TIMEOUT_MS =
-            200L
+            1000L
 
         /* Voice older than this when it reaches the front of the queue is dropped. */
         private const val MAX_VOICE_AGE_MS =
             600L
 
-        private const val MAX_CONSECUTIVE_WRITE_FAILURES =
-            25
+        private const val WRITE_STALL_RESET_MS =
+            8_000L
 
         /* No successful write or RSSI reply for this long means the link is dead. */
         private const val LINK_DEAD_MS =

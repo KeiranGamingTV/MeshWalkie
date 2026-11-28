@@ -55,6 +55,9 @@ data class MeshDiagnosticsState(
 
     val congestionDrops: Long = 0,
     val linkResets: Long = 0,
+    val disconnects: Long = 0,
+    val lastDisconnectCode: Int? = null,
+    val lastResetReason: String = "none",
     val jitterTargetMs: Int = 120,
     val framesTrimmed: Long = 0,
 
@@ -536,7 +539,9 @@ object MeshDiagnostics {
         }
     }
 
-    fun recordLinkReset() {
+    fun recordLinkReset(
+        reason: String
+    ) {
 
         synchronized(lock) {
             mutableState.value =
@@ -545,7 +550,27 @@ object MeshDiagnostics {
                         mutableState
                             .value
                             .linkResets +
-                            1
+                                1,
+                    lastResetReason =
+                        reason
+                )
+        }
+    }
+
+    fun recordDisconnect(
+        code: Int
+    ) {
+
+        synchronized(lock) {
+            mutableState.value =
+                mutableState.value.copy(
+                    disconnects =
+                        mutableState
+                            .value
+                            .disconnects +
+                                1,
+                    lastDisconnectCode =
+                        code
                 )
         }
     }

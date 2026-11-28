@@ -21,6 +21,10 @@ import java.util.TreeMap
 import kotlin.math.max
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.os.Process
+import java.util.concurrent.Executors
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
 
 class WalkieAudioEngine(
     context: Context
@@ -35,9 +39,47 @@ class WalkieAudioEngine(
                 Dispatchers.IO
         )
 
+    private fun audioThread(
+        name: String
+    ): ExecutorCoroutineDispatcher =
+        Executors
+            .newSingleThreadExecutor {
+                    runnable ->
+
+                Thread {
+                    Process.setThreadPriority(
+                        Process
+                            .THREAD_PRIORITY_URGENT_AUDIO
+                    )
+
+                    runnable.run()
+                }.apply {
+                    this.name =
+                        name
+                }
+            }
+            .asCoroutineDispatcher()
+
+    private val captureDispatcher =
+        audioThread(
+            "walkie-capture"
+        )
+
+    private val playoutDispatcher =
+        audioThread(
+            "walkie-playout"
+        )
+
+    @Volatile
+    private var needsPrime =
+        true
+
+    private var lastUnderrunCount =
+        0
+
     @Volatile
     private var recorder:
-        AudioRecord? =
+            AudioRecord? =
         null
 
     private var captureJob:
@@ -133,7 +175,7 @@ class WalkieAudioEngine(
                 AudioRecord(
                     MediaRecorder
                         .AudioSource
-                        .VOICE_COMMUNICATION,
+                        .MIC,
 
                     SAMPLE_RATE,
 
@@ -196,7 +238,9 @@ class WalkieAudioEngine(
         )
 
         captureJob =
-            scope.launch {
+            scope.launch(
+                captureDispatcher
+            ) {
 
                 val frame =
                     ShortArray(
@@ -611,6 +655,9 @@ class WalkieAudioEngine(
                 adaptiveTargetMs.toInt()
             )
 
+        needsPrime =
+            true
+
         return ReceiveSession(
             sessionId =
                 sessionId,
@@ -626,7 +673,9 @@ class WalkieAudioEngine(
     private fun startPlayoutWorker() {
 
         playoutJob =
-            scope.launch {
+            scope.launch(
+                playoutDispatcher
+            ) {
 
                 while (
                     isActive
@@ -948,6 +997,35 @@ class WalkieAudioEngine(
 
         try {
 
+            val underruns =
+                player.underrunCount
+
+            if (
+                needsPrime ||
+                underruns !=
+                lastUnderrunCount
+            ) {
+
+                lastUnderrunCount =
+                    underruns
+
+                needsPrime =
+                    false
+
+                val silence =
+                    ShortArray(
+                        PRIME_SAMPLES
+                    )
+
+                player.write(
+                    silence,
+                    0,
+                    silence.size,
+                    AudioTrack
+                        .WRITE_BLOCKING
+                )
+            }
+
             player.write(
                 pcm,
                 0,
@@ -1097,6 +1175,9 @@ class WalkieAudioEngine(
             null
 
         scope.cancel()
+
+        captureDispatcher.close()
+        playoutDispatcher.close()
     }
 
     private data class ReceiveSession(
@@ -1135,22 +1216,25 @@ class WalkieAudioEngine(
          * buffering.
          */
         private const val JITTER_TARGET_MS =
-            120L
+            160L
 
         private const val MIN_JITTER_TARGET_MS =
-            80L
+            120L
 
         private const val MAX_JITTER_TARGET_MS =
-            400L
+            480L
 
         private const val TARGET_CHANGE_INTERVAL_MS =
-            500L
+            250L
 
         private const val SHRINK_AFTER_STABLE_MS =
-            15_000L
+            30_000L
 
         private const val TRIM_SLACK_FRAMES =
-            2
+            3
+
+        private const val PRIME_SAMPLES =
+            480
 
         private const val TRIM_INTERVAL_MS =
             160L

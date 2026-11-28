@@ -141,6 +141,27 @@ fun DiagnosticsScreen(
             )
 
             DiagnosticRow(
+                "Last reset reason",
+                diagnostics
+                    .lastResetReason
+            )
+
+            DiagnosticRow(
+                "Disconnects",
+                diagnostics
+                    .disconnects
+                    .toString()
+            )
+
+            DiagnosticRow(
+                "Last disconnect code",
+                disconnectLabel(
+                    diagnostics
+                        .lastDisconnectCode
+                )
+            )
+
+            DiagnosticRow(
                 "Authentication failures",
                 diagnostics
                     .decryptFailures
@@ -497,4 +518,18 @@ private fun qualityLabel(
         quality >= 60 -> "Good"
         quality >= 40 -> "Fair"
         else -> "Poor"
+    }
+
+private fun disconnectLabel(
+    code: Int?
+): String =
+    when (code) {
+        null -> "none"
+        0 -> "0 (clean)"
+        8 -> "8 (timeout)"
+        19 -> "19 (remote closed)"
+        22 -> "22 (local closed)"
+        62 -> "62 (failed to establish)"
+        133 -> "133 (generic error)"
+        else -> code.toString()
     }
